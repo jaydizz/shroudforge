@@ -356,7 +356,7 @@ jobs:
   security-report:
     name: Unified release security report
     if: always()
-    needs: [build, security, defender, clamav, virustotal]
+    needs: [build, security, clamav, virustotal]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -405,7 +405,6 @@ jobs:
         env:
           BUILD_JOB_RESULT: ${{ needs.build.result }}
           TRIVY_SOURCE_JOB_RESULT: ${{ needs.security.result }}
-          DEFENDER_JOB_RESULT: ${{ needs.defender.result }}
           RELEASE_SCAN_JOB_RESULT: ${{ needs.clamav.result }}
           VIRUSTOTAL_JOB_RESULT: ${{ needs.virustotal.result }}
           RELEASE_VERSION: ${{ needs.build.outputs.version || 'unknown' }}
@@ -441,7 +440,7 @@ jobs:
 
   publish:
     name: Publish scanned release packages
-    needs: [build, defender, clamav, virustotal, security, security-report]
+    needs: [build, clamav, virustotal, security, security-report]
     runs-on: ubuntu-24.04
     permissions:
       actions: read
