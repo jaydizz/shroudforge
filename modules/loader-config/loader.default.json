@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
   "general": {
-    "locale": "de",
+    "locale": "en-GB",
+    "showNativeModMenu": true,
     "zoomPercent": 100,
     "usernameMode": "auto",
     "messageNameFallback": "Flameborn"
@@ -33,6 +34,30 @@
       "projectId": "shroudforge",
       "loader": "shroudforge"
     }
+  },
+  "hotkeys": {
+    "confirm": [
+      {
+        "scancode": 58,
+        "label": "F1",
+        "emoji": "⚠️",
+        "text": "Enshrouded uses F1 for its feedback window. This binding may also open the feedback window. Assign it anyway?"
+      },
+      {
+        "scancode": 69,
+        "label": "F12",
+        "emoji": "⚠️",
+        "text": "Steam uses F12 for screenshots. This binding may also take a screenshot. Assign it anyway?"
+      }
+    ],
+    "cancel": [
+      {
+        "scancode": 41,
+        "label": "Escape",
+        "emoji": "↩️",
+        "text": "Pressing Escape cancels recording and keeps the current assignment."
+      }
+    ]
   },
   "control": {
     "actions": {
@@ -213,6 +238,15 @@
     }
   },
   "modules": {
+    "modDetection": {
+      "enabled": true,
+      "tolerateUnknownManifestFields": true
+    },
+    "dllManager": {
+      "enabled": true,
+      "excludedDllNames": [],
+      "profiles": []
+    },
     "debugConsole": {
       "enabled": true,
       "popupMode": "bootstrap",
@@ -220,23 +254,23 @@
       "defaultSource": "game",
       "levelFilter": "ALL",
       "autoScroll": true,
-      "toggleKey": 121,
-      "refreshMilliseconds": 500,
-      "tailBytes": 1048576,
+      "toggleKey": "SDL:67",
+      "refreshMilliseconds": 1000,
+      "tailBytes": 65536,
       "window": {
         "position": null
       }
     },
     "worldEditor": {
       "enabled": true,
-      "toggleKey": 113,
-      "refreshMilliseconds": 400
+      "toggleKey": "SDL:59",
+      "refreshMilliseconds": 1000
     },
     "modloaderUi": {
       "enabled": true,
       "startPage": "news",
-      "toggleKey": 120,
-      "refreshMilliseconds": 1000,
+      "toggleKey": "SDL:66",
+      "refreshMilliseconds": 2000,
       "window": {
         "position": null
       }

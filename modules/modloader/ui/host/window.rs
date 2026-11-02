@@ -1,22 +1,22 @@
 use super::apply_language_change::apply_language_change;
 use super::apply_loader_setting::apply_loader_setting;
 use super::apply_loader_settings::apply_loader_settings;
+use super::assess_hotkey_change::assess_hotkey_change;
 use super::apply_mod_enabled::apply_mod_enabled;
+use super::apply_key_reservation::apply_key_reservation;
 use super::apply_mod_settings::apply_mod_settings;
 use super::change_notice_read_state::change_notice_read_state;
 use super::change_storage_folder::change_storage_folder;
 use super::copy_activity_log::copy_activity_log;
 use super::invoke_updater_request::{UpdaterRequestResult, spawn as spawn_updater_request};
-use super::log_configuration_changes::log_configuration_check_transitions;
-use super::log_player_name_detection::log_player_name_detection;
 use super::open_requested_folder::open_requested_folder;
 use super::open_requested_link::open_requested_link;
 use super::parse_ui_command::Command;
 use super::parse_ui_command::UiCommand;
 use super::parse_ui_command::parse_ui_command;
+use super::handoff_to_client::handoff_to_client;
 use super::read_host_arguments::Arguments;
 use super::read_host_arguments::arguments;
-use super::read_installed_mods::read_mods;
 use super::read_missing_updater_announcement;
 use super::read_release_status::idle_release_status;
 use super::read_ui_configuration::default_refresh;
@@ -27,12 +27,14 @@ use super::read_ui_configuration::load_module_config;
 use super::read_ui_configuration::load_user_config;
 use super::read_ui_configuration::read_central_config;
 use super::read_ui_snapshot::default_catalog_state;
-use super::read_ui_snapshot::read_ui_snapshot;
 use super::read_window_focus::foreground_is_shroudforge_window;
 use super::read_window_focus::foreground_process;
+use super::read_window_focus::foreground_title;
 use super::read_window_focus::open_event;
+use super::native_menu_toggle::NativeMenuToggle;
 use super::refresh_activity_log::refresh_activity_log;
 use super::refresh_installed_mod::refresh_installed_mod;
+use super::refresh_ui_snapshot::SnapshotRefresher;
 use super::reload_loader_settings::reload_loader_settings;
 use super::report_command_result::report_command_result;
 use super::request_diagnostics::request_diagnostics;
@@ -41,7 +43,7 @@ use super::request_module_visibility::request_module_visibility;
 use super::ui_snapshot_types::ModuleConfig;
 use super::{
     dispatch_control_actions::dispatch_control_actions,
-    log_configuration_errors::log_configuration_errors, watch_toggle_key::watch_toggle_key,
+    watch_toggle_key::watch_toggle_key,
 };
 use shroudforge_logging::write_activity;
 use shroudforge_window_management::WindowDefaults;
@@ -53,8 +55,7 @@ use std::fs;
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::sync::RwLock;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
@@ -74,11 +75,31 @@ use wry::WebContext;
 use wry::WebViewBuilder;
 use wry::WebViewBuilderExtWindows;
 
-pub(crate) const DEFAULT_TOGGLE_KEY: u32 = 120; // F9
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum UiEvent {
     Toggle,
+    KeybindLabels(Vec<String>),
+    KeybindCaptureFailed(String, String),
+}
+
+struct KeybindCapture {
+    request_id: String,
+    delivered: bool,
+}
+
+fn cancel_keybind_capture(capture: &Mutex<Option<KeybindCapture>>, request_id: Option<&str>) {
+    let Ok(mut owner) = capture.lock() else {
+        return;
+    };
+    let Some(current) = owner.as_ref() else {
+        return;
+    };
+    if request_id.is_some_and(|id| id != current.request_id) {
+        return;
+    }
+    *owner = None;
+    let _ = shroudforge_hotkeys::set_capture_active(false, shroudforge_hotkeys::InputDevice::Keyboard);
+    let _ = shroudforge_hotkeys::take_captured_hotkey();
 }
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,6 +109,31 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
+    if let Err(error) = shroudforge_logging::initialize(&arguments.root, false) {
+        eprintln!("Could not initialize UI logging: {error}");
+    }
+    if arguments.desktop {
+        match handoff_to_client(&arguments.root) {
+            Ok(Some(_)) => {
+                let _ = shroudforge_logging::append(
+                    &arguments.root,
+                    'I',
+                    "ui",
+                    "Desktop Modloader handed over to the running game client UI.",
+                );
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = shroudforge_logging::append(
+                    &arguments.root,
+                    'W',
+                    "ui",
+                    &format!("Could not hand over to the running game client UI: {error}"),
+                );
+            }
+        }
+    }
     if !arguments.desktop
         && read_central_config(&arguments.root)["modules"]["modloaderUi"]["enabled"] == false
     {
@@ -118,6 +164,12 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         .map(open_event)
         .unwrap_or(std::ptr::null_mut());
     let event_loop = EventLoopBuilder::<UiEvent>::with_user_event().build();
+    // Tao registers raw devices when creating its loop. This UI uses window
+    // events, so release Tao's device receiver before SDL owns keyboard input.
+    event_loop.set_device_event_filter(tao::event_loop::DeviceEventFilter::Always);
+    if let Err(error) = shroudforge_hotkeys::initialize() {
+        let _ = shroudforge_logging::append(&arguments.root, 'W', "hotkeys", &error);
+    }
     let modloader_height = event_loop
         .primary_monitor()
         .map(|monitor| {
@@ -129,7 +181,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
     let (icon_rgba, icon_width, icon_height) = shroudforge_ui_resources::rgba()?;
     let icon = tao::window::Icon::from_rgba(icon_rgba, icon_width, icon_height)?;
     let title = "ShroudForge | Modloader";
-    let (inner_width, inner_height) = (1180.0, modloader_height);
+    let (inner_width, inner_height) = (1290.0, modloader_height);
     let window_defaults = WindowDefaults {
         width: inner_width,
         height: inner_height,
@@ -139,7 +191,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         .with_taskbar_icon(Some(icon))
         .with_title(title)
         .with_decorations(false)
-        .with_always_on_top(true)
+        .with_always_on_top(false)
         .with_resizable(true)
         .with_visible(arguments.desktop)
         .with_inner_size(LogicalSize::new(inner_width, inner_height))
@@ -153,18 +205,87 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         apply_window_geometry(&window, &saved_position, false, window_defaults);
     let (sender, receiver) = mpsc::channel();
     let hotkey_proxy = event_loop.create_proxy();
-    let hotkey_key = Arc::new(AtomicU32::new(module_config.toggle_key));
+    let hotkey_key = Arc::new(RwLock::new(shroudforge_hotkeys::parse_hotkey(&module_config.toggle_key)?));
     let hotkey_key_watcher = hotkey_key.clone();
     let game_pid = arguments.game_pid;
-    let desktop = arguments.desktop;
-    watch_toggle_key(hotkey_proxy, hotkey_key_watcher, game_pid, desktop);
+    watch_toggle_key(
+        hotkey_proxy.clone(),
+        hotkey_key_watcher,
+        game_pid,
+        arguments.desktop,
+    );
+    let mut native_menu_toggle = if !arguments.desktop && !arguments.server {
+        let enabled = read_central_config(&arguments.root)
+            .pointer("/general/showNativeModMenu")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        match NativeMenuToggle::new(game_pid, enabled, hotkey_proxy.clone()) {
+            Ok(toggle) => toggle,
+            Err(error) => {
+                let _ = shroudforge_logging::append(&arguments.root, 'W', "native-menu", &error);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let control_sender = sender.clone();
     let (updater_request_sender, updater_request_receiver) =
         mpsc::channel::<UpdaterRequestResult>();
+    let capture_root = arguments.root.clone();
+    let capture_owner = Arc::new(Mutex::new(None::<KeybindCapture>));
+    let ipc_capture_owner = capture_owner.clone();
+    let keybind_proxy = event_loop.create_proxy();
     let handler = move |message: wry::http::Request<String>| {
         let Ok(value) = serde_json::from_str::<UiCommand>(message.body()) else {
             return;
         };
+        if value.command == "keybind-capture" {
+            if !value.enabled.unwrap_or(false) {
+                cancel_keybind_capture(&ipc_capture_owner, value.id.as_deref());
+                return;
+            }
+            let request_id = value.request_id.unwrap_or_default();
+            if request_id.is_empty() {
+                return;
+            }
+            let Ok(mut owner) = ipc_capture_owner.lock() else {
+                return;
+            };
+            let _ = shroudforge_hotkeys::take_captured_hotkey();
+            let device = value.device.unwrap_or(shroudforge_hotkeys::InputDevice::Keyboard);
+            if let Err(error) = shroudforge_hotkeys::set_capture_active(true, device) {
+                *owner = None;
+                let _ = shroudforge_logging::append(&capture_root, 'E', "hotkeys", &error);
+                let _ = keybind_proxy.send_event(UiEvent::KeybindCaptureFailed(request_id, error));
+            } else {
+                let _ = shroudforge_logging::append(
+                    &capture_root, 'D', "hotkeys", &format!("Shortcut capture started: {device:?}"),
+                );
+                *owner = Some(KeybindCapture {
+                    request_id,
+                    delivered: false,
+                });
+            }
+            return;
+        }
+        if value.command == "keybind-labels" {
+            if let Some(values) = value.values.and_then(|values| values.as_array().cloned()) {
+                if values.len() <= 256 {
+                    let bindings = values
+                        .into_iter()
+                        .filter_map(|value| {
+                            value
+                                .as_str()
+                                .filter(|value| !value.is_empty() && value.len() <= 100)
+                                .map(str::to_owned)
+                        })
+                        .collect();
+                    let _ = keybind_proxy.send_event(UiEvent::KeybindLabels(bindings));
+                }
+            }
+            return;
+        }
         let Some(command) = parse_ui_command(value, arguments.desktop, arguments.server) else {
             return;
         };
@@ -207,14 +328,17 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         .with_url("shroudforge://localhost/index.html")
         .with_ipc_handler(handler)
         .build(&window)?;
+    let _ = webview.set_visible(window.is_visible() && !window.is_minimized());
 
     let mut shown = arguments.desktop;
-    let mut previous_configuration_errors = std::collections::HashSet::<String>::new();
-    let mut previous_player_name_detection = None;
-    let mut previous_configuration_checks =
-        std::collections::BTreeMap::<String, (String, String)>::new();
-    let mut previous_asset_status = std::collections::BTreeMap::<String, (String, String)>::new();
-    let mut previous_mod_statuses = std::collections::BTreeMap::<String, (String, String)>::new();
+    let mut window_topmost = false;
+    let mut shown_at = Instant::now();
+    let mut refresher = SnapshotRefresher::start(
+        &arguments,
+        &release_state,
+        &release_announcement,
+        &catalog_state,
+    );
     let initial_window_state = shroudforge_loader_config::config::window_state(&arguments.root);
     let mut visibility_request_id = initial_window_state["modloaderUi"]["requestId"]
         .as_u64()
@@ -224,6 +348,19 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         "modloaderUi",
         shown,
     );
+    if !arguments.desktop {
+        if let Err(error) = shroudforge_loader_config::config::publish_modloader_client_pid(
+            &arguments.root,
+            unsafe { GetCurrentProcessId() },
+        ) {
+            let _ = shroudforge_logging::append(
+                &arguments.root,
+                'W',
+                "ui",
+                &format!("Could not publish the game client UI process: {error}"),
+            );
+        }
+    }
     if read_central_config(&arguments.root)["modules"]["debugConsole"]["enabled"] == false {
         let _ = shroudforge_loader_config::config::publish_window_visibility(
             &arguments.root,
@@ -232,14 +369,20 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
         );
     }
     let mut next_refresh = Instant::now();
+    let mut latest_snapshot = String::new();
+    let mut last_snapshot = String::new();
+    let mut last_window_state = String::new();
+    let mut webview_visible = window.is_visible() && !window.is_minimized();
     let mut next_announcement_retry = Instant::now() + Duration::from_secs(30);
     let mut next_visibility_poll = Instant::now();
+    let mut next_client_handoff_poll = Instant::now();
     let mut next_window_state_refresh = Instant::now();
     let mut next_control_poll = Instant::now();
     let mut active_provider = provider;
     let mut desktop_debug_console: Option<Child> = None;
     let mut recovered_control_actions = false;
     let mut loaded_settings_revision = live_settings_revision(&arguments.root);
+    let mut keybind_layout_revision = shroudforge_hotkeys::layout_revision();
     let mut pending_window_geometry_save: Option<Instant> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
@@ -289,15 +432,49 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
+                if arguments.desktop && Instant::now() >= next_client_handoff_poll {
+                    let mut retry_after = Duration::from_millis(250);
+                    match handoff_to_client(&arguments.root) {
+                        Ok(Some(_)) => {
+                            let _ = shroudforge_logging::append(
+                                &arguments.root,
+                                'I',
+                                "ui",
+                                "Desktop Modloader handed over to the running game client UI.",
+                            );
+                            let _ = shroudforge_loader_config::config::publish_window_visibility(
+                                &arguments.root,
+                                "modloaderUi",
+                                false,
+                            );
+                            *control_flow = ControlFlow::Exit;
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let _ = shroudforge_logging::append(
+                                &arguments.root,
+                                'W',
+                                "ui",
+                                &format!("Could not hand over to the running game client UI: {error}"),
+                            );
+                            retry_after = Duration::from_secs(5);
+                        }
+                    }
+                    next_client_handoff_poll = Instant::now() + retry_after;
+                }
                 if Instant::now() >= next_control_poll {
                     let current_settings_revision = live_settings_revision(&arguments.root);
                     if current_settings_revision != loaded_settings_revision {
                         if let Ok(updated_module_config) = load_module_config(&arguments.root) {
-                            let toggle_key = updated_module_config.toggle_key;
+                            let toggle_key = shroudforge_hotkeys::parse_hotkey(&updated_module_config.toggle_key)
+                                .ok().flatten();
                             active_provider =
                                 effective_provider(&load_user_config(&arguments.root));
                             module_config = updated_module_config;
-                            hotkey_key.store(toggle_key, Ordering::Relaxed);
+                            if let Ok(mut binding) = hotkey_key.write() {
+                                *binding = toggle_key;
+                            }
                             if read_central_config(&arguments.root)["modules"]["debugConsole"]["enabled"] == false {
                                 let _ = shroudforge_loader_config::config::publish_window_visibility(
                                     &arguments.root,
@@ -322,7 +499,21 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         loaded_settings_revision = current_settings_revision;
                     }
                     dispatch_control_actions(&arguments, &control_sender, &mut recovered_control_actions);
-                    next_control_poll = Instant::now() + Duration::from_millis(250);
+                    if let Some(toggle) = native_menu_toggle.as_mut() {
+                        let enabled = read_central_config(&arguments.root)
+                            .pointer("/general/showNativeModMenu")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        if !toggle.set_enabled(enabled) {
+                            let _ = shroudforge_logging::append(
+                                &arguments.root,
+                                'W',
+                                "native-menu",
+                                "Could not update native mod menu visibility",
+                            );
+                        }
+                    }
+                    next_control_poll = Instant::now() + Duration::from_secs(1);
                 }
                 while let Ok(result) = updater_request_receiver.try_recv() {
                     if result.operation == "remove-mod" {
@@ -588,6 +779,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             next_refresh = Instant::now();
                         }
                         Command::Hide(request_id) => {
+                            cancel_keybind_capture(&capture_owner, None);
                             let result = shroudforge_loader_config::config::publish_window_visibility(
                                 &arguments.root,
                                 "modloaderUi",
@@ -679,6 +871,24 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             &arguments,
                             &webview,
                             &mut next_refresh,
+                        ),
+                        Command::SaveKeyReservation(id, key, device, reserved, request_id) => {
+                            apply_key_reservation(
+                                id,
+                                key,
+                                device,
+                                reserved,
+                                request_id,
+                                &arguments,
+                                &webview,
+                                &mut next_refresh,
+                            )
+                        }
+                        Command::AssessHotkey(target, request_id) => assess_hotkey_change(
+                            target,
+                            request_id,
+                            &arguments,
+                            &webview,
                         ),
                         Command::SaveSettings(settings, request_id) => apply_loader_settings(
                             settings,
@@ -787,6 +997,9 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                             None,
                             "debug",
                         ),
+                        Command::UiLog(event) => {
+                            super::record_ui_log::record_ui_log(&arguments.root, &webview, event)
+                        }
                         Command::UiError(message) => write_activity(
                             &arguments.root,
                             "modloader-ui",
@@ -814,10 +1027,13 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         };
                         if shown {
                             window.set_minimized(false);
+                        } else {
+                            cancel_keybind_capture(&capture_owner, None);
                         }
                         window.set_visible(shown);
                         if shown {
                             window.set_focus();
+                            shown_at = Instant::now();
                         }
                         let _ = shroudforge_loader_config::config::publish_window_visibility(
                             &arguments.root,
@@ -829,21 +1045,54 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                 }
                 if Instant::now() >= next_window_state_refresh {
                     let windows = shroudforge_loader_config::config::window_state(&arguments.root);
-                    if let Ok(payload) = serde_json::to_string(&windows) {
-                        let _ = webview.evaluate_script(&format!(
-                            "window.__shroudforgeWindowState({payload});"
-                        ));
+                    if let Ok(payload) = serde_json::to_string(&windows)
+                        && payload != last_window_state
+                        && webview
+                            .evaluate_script(&format!("window.__shroudforgeWindowState({payload});"))
+                            .is_ok()
+                    {
+                        last_window_state = payload;
                     }
                     next_window_state_refresh = Instant::now() + Duration::from_millis(250);
                 }
                 let foreground = foreground_process();
-                let game_focused = arguments.desktop || foreground == arguments.game_pid;
-                let ui_focused = foreground == unsafe { GetCurrentProcessId() }
-                    || foreground_is_shroudforge_window();
-                if !arguments.desktop && shown && !game_focused && !ui_focused {
+                let game_focused = !arguments.desktop && foreground == arguments.game_pid;
+                let own_window_focused = foreground == unsafe { GetCurrentProcessId() };
+                let ui_focused = own_window_focused || foreground_is_shroudforge_window();
+                let next_topmost =
+                    !arguments.desktop && shown && (game_focused || own_window_focused);
+                if next_topmost != window_topmost {
+                    window.set_always_on_top(next_topmost);
+                    window_topmost = next_topmost;
+                }
+                let focus_settled =
+                    foreground != 0 && shown_at.elapsed() >= Duration::from_millis(500);
+                if !arguments.desktop && shown && focus_settled && !game_focused && !ui_focused {
+                    if window.is_visible() {
+                        write_activity(
+                            &arguments.root,
+                            "Modloader UI",
+                            "Hide window",
+                            "Focus elsewhere",
+                            Some(&format!(
+                                "foreground process {foreground}, window \"{}\"",
+                                foreground_title()
+                            )),
+                            "info",
+                        );
+                    }
                     window.set_visible(false);
                 } else if shown && (game_focused || ui_focused) && !window.is_visible() {
                     window.set_visible(true);
+                    shown_at = Instant::now();
+                }
+                let visible = window.is_visible() && !window.is_minimized();
+                if visible != webview_visible {
+                    let _ = webview.set_visible(visible);
+                    webview_visible = visible;
+                    if visible {
+                        next_refresh = Instant::now();
+                    }
                 }
 
                 if Instant::now() >= next_refresh {
@@ -857,9 +1106,18 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         }
                         next_announcement_retry = Instant::now() + Duration::from_secs(30);
                     }
-                    let next_position = read_central_config(&arguments.root)["modules"]
-                        [window_config_module]["window"]["position"]
-                        .clone();
+                    next_refresh = Instant::now()
+                        + Duration::from_millis(
+                            module_config.refresh_milliseconds.clamp(250, 10_000),
+                        );
+                    if visible {
+                        refresher.request(&active_provider);
+                    }
+                }
+                if let Some(refreshed) = refresher.take() {
+                    let next_position =
+                        refreshed.central["modules"][window_config_module]["window"]["position"]
+                            .clone();
                     if next_position != saved_position {
                         pending_window_geometry_save = None;
                         effective_window_geometry = apply_window_geometry(
@@ -870,54 +1128,88 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                         );
                         saved_position = next_position;
                     }
-                    next_refresh = Instant::now()
-                        + Duration::from_millis(module_config.refresh_milliseconds.clamp(250, 10_000));
-                    let central = read_central_config(&arguments.root);
-                    let mods = read_mods(&arguments.root);
-                    let notification_mods: Vec<_> = mods.iter().map(|item| shroudforge_news::ModNotification {
-                        id: &item.id, name: &item.name, version: &item.version, ecosystem: item.ecosystem, changelog: &item.changelog,
-                    }).collect();
-                    shroudforge_news::sync_mod_events(&arguments.root, &notification_mods);
-                    let game_process_id =
-                        (!arguments.desktop && !arguments.server).then_some(arguments.game_pid);
-                    let player_name_detection =
-                        shroudforge_player_name::detect_active_character_for_process(
-                            &arguments.root,
-                            game_process_id,
+                    if let Some(payload) = refreshed.payload {
+                        latest_snapshot = payload;
+                    }
+                }
+                if visible
+                    && !latest_snapshot.is_empty()
+                    && latest_snapshot != last_snapshot
+                    && webview
+                        .evaluate_script(&format!("window.__shroudforgeUpdate({latest_snapshot});"))
+                        .is_ok()
+                {
+                    last_snapshot = latest_snapshot.clone();
+                }
+            }
+            Event::MainEventsCleared => {
+                let current_layout_revision = shroudforge_hotkeys::layout_revision();
+                if current_layout_revision != keybind_layout_revision {
+                    keybind_layout_revision = current_layout_revision;
+                    let _ = webview.evaluate_script(
+                        "window.dispatchEvent(new Event('shroudforge-keybind-labels-changed'));"
+                    );
+                }
+                let captured = capture_owner.lock().ok().and_then(|mut owner| {
+                    let current = owner.as_mut().filter(|current| !current.delivered)?;
+                    let hotkey = shroudforge_hotkeys::take_captured_hotkey()?;
+                    current.delivered = true;
+                    Some(serde_json::json!({
+                        "requestId": current.request_id,
+                        "value": hotkey.normalized(),
+                        "label": hotkey.label(),
+                    }))
+                });
+                if let Some(payload) = captured {
+                    if shroudforge_logging::allows(&arguments.root, 'T') {
+                        let _ = shroudforge_logging::append(
+                            &arguments.root, 'T', "hotkeys", &format!("Shortcut capture completed: {payload}"),
                         );
-                    let (snapshot, resolved_player_name) = read_ui_snapshot(
-                        &arguments,
-                        &active_provider,
-                        &release_state,
-                        &release_announcement,
-                        &catalog_state,
-                        central,
-                        mods,
-                        &player_name_detection,
-                    );
-                    log_player_name_detection(
-                        &arguments.root,
-                        &player_name_detection,
-                        &resolved_player_name,
-                        &mut previous_player_name_detection,
-                    );
-                    log_configuration_check_transitions(
-                        &arguments.root,
-                        &snapshot.configuration,
-                        &mut previous_configuration_checks,
-                        &mut previous_asset_status,
-                        &mut previous_mod_statuses,
-                    );
-                    log_configuration_errors(&arguments.root, &snapshot, &mut previous_configuration_errors);
-                    if let Ok(payload) = serde_json::to_string(&snapshot) {
-                        let _ = webview.evaluate_script(&format!(
-                            "window.__shroudforgeUpdate({payload});"
-                        ));
+                    }
+                    if let Err(error) = webview.evaluate_script(&format!(
+                        "window.dispatchEvent(new CustomEvent('shroudforge-keybind-captured',{{detail:{payload}}}));"
+                    )) {
+                        cancel_keybind_capture(&capture_owner, None);
+                        let _ = shroudforge_logging::append(
+                            &arguments.root, 'E', "hotkeys", &error.to_string(),
+                        );
                     }
                 }
             }
+            Event::UserEvent(UiEvent::KeybindLabels(bindings)) => {
+                let labels: std::collections::BTreeMap<_, _> = bindings
+                    .into_iter()
+                    .filter_map(|value| {
+                        shroudforge_hotkeys::parse_hotkey(&value)
+                            .ok()
+                            .flatten()
+                            .map(|hotkey| (value, hotkey.label()))
+                    })
+                    .collect();
+                let payload = serde_json::json!({ "labels": labels });
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('shroudforge-keybind-labels',{{detail:{payload}}}));"
+                ));
+            }
+            Event::UserEvent(UiEvent::KeybindCaptureFailed(request_id, error)) => {
+                let payload = serde_json::json!({ "requestId": request_id, "error": error });
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('shroudforge-keybind-captured',{{detail:{payload}}}));"
+                ));
+                report_command_result(
+                    &arguments.root,
+                    &webview,
+                    &request_id,
+                    "Hotkeys",
+                    "Capture hotkey",
+                    Err(error),
+                    "hotkeys.unsupported",
+                    None,
+                    false,
+                );
+            }
             Event::UserEvent(UiEvent::Toggle) => {
-                if !arguments.server
+                if !arguments.server && !shroudforge_hotkeys::is_capture_active()
                     && (arguments.desktop
                         || read_central_config(&arguments.root)["modules"]["modloaderUi"]["enabled"]
                             != false)
@@ -935,9 +1227,14 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                     if shown {
                         next_refresh = Instant::now();
                         window.set_focus();
+                        shown_at = Instant::now();
                     }
                 }
             }
+            Event::WindowEvent {
+                event: WindowEvent::Focused(false),
+                ..
+            } => cancel_keybind_capture(&capture_owner, None),
             Event::WindowEvent {
                 event: WindowEvent::Moved(_),
                 ..
@@ -956,6 +1253,7 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                cancel_keybind_capture(&capture_owner, None);
                 if arguments.desktop {
                     let _ = shroudforge_loader_config::config::publish_window_visibility(
                         &arguments.root,
@@ -974,6 +1272,14 @@ pub(crate) fn run_with_arguments(arguments: Arguments) -> Result<(), Box<dyn std
                 }
             }
             Event::LoopDestroyed => {
+                cancel_keybind_capture(&capture_owner, None);
+                if !arguments.desktop {
+                    let pid = unsafe { GetCurrentProcessId() };
+                    let _ = shroudforge_loader_config::config::clear_modloader_client_pid(
+                        &arguments.root,
+                        pid,
+                    );
+                }
                 if current_window_geometry(&window)
                     .is_some_and(|geometry| geometry != effective_window_geometry)
                 {

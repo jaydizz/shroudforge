@@ -29,7 +29,7 @@ pub(crate) fn update_mod_configuration(
         Err(error) => return Err(error),
     };
     update(&mut extension)?;
-    crate::config::validate_document(root, crate::documents::EXTENDED_MOD, &extension)?;
+    crate::parse_mod_manifest::validate_extended_mod_document(root, &extension)?;
     let wire_manifest = serde_json::from_slice(&read_package_file(&package, "mod.json")?)
         .map_err(|error| error.to_string())?;
     crate::config::parse_manifest_with_extension(root, wire_manifest, Some(extension.clone()))?;
@@ -130,6 +130,36 @@ mod tests {
         assert_eq!(saved["enabled"], true);
         assert_eq!(saved["launcher"], "EML");
         assert_eq!(saved["targets"], serde_json::json!(["client", "server"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saving_preset_settings_keeps_the_presets() {
+        let (root, package) = test_package(Some(
+            br#"{"schemaVersion":1,"enabled":true,"settings":{
+                "quality":{"value":"low","options":{"low":"Low","high":"High","custom":"Custom"}},
+                "range":{"value":64}
+            },"presets":{"quality":{"settings":["range"],"values":{"low":{"range":64},"high":{"range":256}}}}}"#,
+        ));
+        let revision = config_revision(&serde_json::json!({
+            "enabled": true,
+            "settings": {"quality": "low", "range": 64}
+        }));
+
+        crate::save_mod_settings(
+            &root,
+            "example",
+            &serde_json::json!({"quality": "high", "range": 256}),
+            &revision,
+        )
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(package.join("extended.mod.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["settings"]["quality"]["value"], "high");
+        assert_eq!(saved["settings"]["range"]["value"], 256);
+        assert_eq!(saved["presets"]["quality"]["values"]["high"]["range"], 256);
         std::fs::remove_dir_all(root).unwrap();
     }
 

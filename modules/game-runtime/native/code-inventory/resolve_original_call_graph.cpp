@@ -14,6 +14,7 @@ struct Image {
     std::uint32_t size{};
     std::map<std::uint32_t, std::vector<Range>> procedures;
     std::vector<Range> ranges;
+    std::vector<IMAGE_SECTION_HEADER> sections;
 
     bool Read(std::uint32_t offset, void* out, std::size_t bytes) const {
         return offset <= size && bytes <= size - offset &&
@@ -30,6 +31,18 @@ struct Image {
             nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
             nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return;
         size = nt.OptionalHeader.SizeOfImage;
+        const auto section_table = static_cast<std::size_t>(dos.e_lfanew) +
+            offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+        if (!size || size > 1024u * 1024u * 1024u || !nt.FileHeader.NumberOfSections ||
+            nt.FileHeader.NumberOfSections > 128 || section_table > size ||
+            nt.FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) > size - section_table)
+            throw std::runtime_error("invalid original section table");
+        sections.resize(nt.FileHeader.NumberOfSections);
+        if (!Read(static_cast<std::uint32_t>(section_table), sections.data(), sections.size() * sizeof(IMAGE_SECTION_HEADER)))
+            throw std::runtime_error("unreadable original section table");
+        for (const auto& section : sections)
+            if (section.VirtualAddress > size || section.Misc.VirtualSize > size - section.VirtualAddress)
+                throw std::runtime_error("invalid original section range");
         const auto dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
         if (!size || dir.Size % sizeof(RUNTIME_FUNCTION) || !dir.Size || dir.Size > 16 * 1024 * 1024)
             throw std::runtime_error("invalid original unwind directory");
@@ -197,6 +210,26 @@ bool EvidenceUnchanged(const CodeEvidence& evidence) {
             !std::equal(block.bytes.begin(), block.bytes.end(), observed.begin())) return false;
     }
     return true;
+}
+
+bool ReadImageSections(std::vector<ImageSection>& output) {
+    try {
+        const auto& im = image();
+        std::vector<ImageSection> result;
+        for (const auto& header : im.sections) {
+            if (!(header.Characteristics & IMAGE_SCN_MEM_READ) || !header.Misc.VirtualSize) continue;
+            ImageSection section{im.base + header.VirtualAddress, header.Misc.VirtualSize, header.Characteristics, {}};
+            if (!(header.Characteristics & IMAGE_SCN_MEM_WRITE) &&
+                (header.Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_INITIALIZED_DATA))) {
+                section.bytes.resize(section.size);
+                if (!im.Read(header.VirtualAddress, section.bytes.data(), section.size)) return false;
+            }
+            result.push_back(std::move(section));
+        }
+        if (result.empty()) return false;
+        output = std::move(result);
+        return true;
+    } catch (...) { return false; }
 }
 
 bool ReadProcedure(std::uintptr_t entry, Procedure& output) {
@@ -380,6 +413,26 @@ bool ReadProcedure(std::uintptr_t entry, Procedure& output) {
         std::sort(result.instructions.begin(), result.instructions.end(), [](const auto& a, const auto& b) { return a.address < b.address; });
         output = std::move(result);
         return true;
+    } catch (...) { return false; }
+}
+
+bool ReadContainingProcedure(std::uintptr_t address, Procedure& output) {
+    try {
+        const auto& im = image();
+        if (!im.size || address < im.base || address - im.base >= im.size) return false;
+        const auto offset = static_cast<std::uint32_t>(address - im.base);
+        for (const auto& [entry, ranges] : im.procedures) {
+            if (!std::any_of(ranges.begin(), ranges.end(), [offset](const Range& range) {
+                return range.begin <= offset && offset < range.end;
+            })) continue;
+            Procedure result;
+            if (!ReadProcedure(im.base + entry, result) ||
+                !std::any_of(result.instructions.begin(), result.instructions.end(),
+                    [address](const Instruction& instruction) { return instruction.address == address; })) return false;
+            output = std::move(result);
+            return true;
+        }
+        return false;
     } catch (...) { return false; }
 }
 

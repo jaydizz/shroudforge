@@ -593,6 +593,57 @@
     "modules": {
       "type": "object",
       "properties": {
+        "modDetection": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "tolerateUnknownManifestFields": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "dllManager": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "excludedDllNames": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "type": "string", "minLength": 1, "maxLength": 255 }
+            },
+            "profiles": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "required": ["id", "packageDirectory", "name", "target", "enabled", "approved", "files"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+                  "packageDirectory": { "type": "string", "minLength": 1, "maxLength": 255 },
+                  "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+                  "target": { "enum": ["client", "server", "both"] },
+                  "enabled": { "type": "boolean" },
+                  "approved": { "type": "boolean" },
+                  "compatibilityProfile": { "type": ["string", "null"], "maxLength": 128 },
+                  "files": {
+                    "type": "array",
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "required": ["path"],
+                      "properties": {
+                        "path": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\\\:]+\\.[dD][lL][lL]$" },
+                        "mode": { "enum": ["library", "dinput8"] }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
         "debugConsole": {
           "type": "object",
           "properties": {
@@ -633,9 +684,7 @@
               "type": "boolean"
             },
             "toggleKey": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 255
+              "$ref": "#/$defs/keybind"
             },
             "refreshMilliseconds": {
               "type": "integer",
@@ -695,9 +744,7 @@
               "type": "boolean"
             },
             "toggleKey": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 255
+              "$ref": "#/$defs/keybind"
             },
             "refreshMilliseconds": {
               "type": "integer",
@@ -744,9 +791,7 @@
               ]
             },
             "toggleKey": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 255
+              "$ref": "#/$defs/keybind"
             },
             "refreshMilliseconds": {
               "type": "integer",
@@ -985,6 +1030,30 @@
         }
       }
     },
+    "hotkeys": {
+      "type": "object",
+      "description": "Configure protected SDL scancodes in the confirm and cancel groups. Edit this section in shroudforge/config/modloader-config.json.",
+      "required": ["confirm", "cancel"],
+      "properties": {
+        "confirm": {
+          "type": "array",
+          "description": "Ask before assigning any listed key.",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/protectedHotkey"
+          }
+        },
+        "cancel": {
+          "type": "array",
+          "description": "Cancel recording and keep the current assignment for any listed key.",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/protectedHotkey"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "general": {
       "type": "object",
       "properties": {
@@ -996,6 +1065,9 @@
           "type": "boolean"
         },
         "reducedMotion": {
+          "type": "boolean"
+        },
+        "showNativeModMenu": {
           "type": "boolean"
         },
         "zoomPercent": {
@@ -1017,6 +1089,23 @@
     }
   },
   "$defs": {
+    "protectedHotkey": {
+      "type": "object",
+      "required": ["scancode", "label", "emoji", "text"],
+      "properties": {
+        "scancode": { "type": "integer", "minimum": 1, "maximum": 999 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "emoji": { "type": "string", "minLength": 1, "maxLength": 16 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 }
+      },
+      "additionalProperties": false
+    },
+    "keybind": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "One shortcut string containing an SDL keyboard chord, a Mouse button chord, or keyboard|mouse alternatives. Each chord supports ordered Ctrl, Alt, Shift and Meta prefixes. Empty disables the shortcut.",
+      "pattern": "^(?:(?:Ctrl\\+)?(?:Alt\\+)?(?:Shift\\+)?(?:Meta\\+)?SDL:[1-9][0-9]{0,2}(?:\\|(?:Ctrl\\+)?(?:Alt\\+)?(?:Shift\\+)?(?:Meta\\+)?Mouse:[1-9][0-9]?)?|(?:Ctrl\\+)?(?:Alt\\+)?(?:Shift\\+)?(?:Meta\\+)?Mouse:[1-9][0-9]?)?$"
+    },
     "latestSystemRelease": {
       "oneOf": [
         {

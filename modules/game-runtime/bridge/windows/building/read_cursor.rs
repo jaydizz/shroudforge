@@ -41,7 +41,36 @@ pub fn world_cursor_read_input(component_size: usize) -> Result<(Vec<u8>, u64), 
         5 => {
             Err("Local cursor query is still scanning or changed. Retry on the next update".into())
         }
-        6 => Err("local cursor input is ambiguous in the main-client ECS manager".into()),
+        6 => Err(match input_detail() {
+            Some(detail) => format!("local cursor input is ambiguous in the main-client ECS manager ({detail})"),
+            None => "local cursor input is ambiguous in the main-client ECS manager".into(),
+        }),
         _ => Err("native local cursor reader returned an unsupported result".into()),
     }
+}
+
+/// How the native reader chose among several player inputs, or why it could not.
+fn input_detail() -> Option<String> {
+    let detail = provider()?.world_cursor_input_detail?;
+    let mut buffer = [0u8; 2048];
+    let length = unsafe { detail(buffer.as_mut_ptr(), buffer.len()) }.min(buffer.len() - 1);
+    (length > 0).then(|| String::from_utf8_lossy(&buffer[..length]).into_owned())
+}
+
+/// Gives the native runtime the reflected layout of the local camera inside
+/// ClientPlayerInput (component size, 9 byte offsets), so that a caller
+/// drawing every frame can read it. False when the runtime lacks it.
+pub fn set_local_camera_layout(component_size: usize, offsets: &[u32]) -> bool {
+    let Some(set) = provider().and_then(|provider| provider.set_local_camera_layout) else {
+        return false;
+    };
+    unsafe { set(component_size, offsets.as_ptr(), offsets.len()) == 1 }
+}
+
+/// Reads the local camera, and the building cursor when `output` has room
+/// for it, into `output` (KfcRuntimeReadLocalCamera). Any thread. None when
+/// the runtime lacks the reader, otherwise its result code.
+pub fn read_local_camera(output: &mut [f64]) -> Option<u32> {
+    let read = provider()?.read_local_camera?;
+    Some(unsafe { read(output.as_mut_ptr(), output.len()) })
 }

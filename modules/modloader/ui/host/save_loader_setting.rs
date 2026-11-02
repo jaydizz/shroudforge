@@ -15,11 +15,15 @@ pub(crate) fn save_setting(
             key,
             "compactMode"
                 | "reducedMotion"
+                | "showNativeModMenu"
                 | "zoomPercent"
                 | "usernameMode"
                 | "messageNameFallback"
         ) {
             return Err("unsupported general setting".into());
+        }
+        if key == "showNativeModMenu" && !setting.is_boolean() {
+            return Err("native mod menu setting must be boolean".into());
         }
         let setting = if key == "messageNameFallback" {
             normalize_message_name(setting.as_str().ok_or("message name must be text")?)?.into()
@@ -117,6 +121,8 @@ pub(crate) fn save_setting(
     }
     let module = module.ok_or("missing module setting target")?;
     let valid = match module {
+        "modDetection" => matches!(key, "enabled" | "tolerateUnknownManifestFields"),
+        "dllManager" => matches!(key, "enabled" | "profiles" | "excludedDllNames"),
         "debugConsole" => {
             matches!(
                 key,
@@ -190,6 +196,26 @@ pub(crate) fn save_setting(
             Ok(())
         });
     }
+    let normalized_setting = match (module, key) {
+        (_, "toggleKey") if setting.is_null() => {
+            let defaults = shroudforge_loader_config::config::read_loader_defaults()?;
+            Some(
+                defaults
+                    .get("modules")
+                    .and_then(|modules| modules.get(module))
+                    .and_then(|module| module.get(key))
+                    .cloned()
+                    .ok_or("module hotkey has no default")?,
+            )
+        }
+        ("dllManager", "profiles") => Some(shroudforge_package::dll_manager::validate_profiles(
+            root, setting,
+        )?),
+        ("dllManager", "excludedDllNames") => {
+            Some(shroudforge_package::dll_manager::normalize_excluded_dll_names(setting)?)
+        }
+        _ => None,
+    };
     if module == "network" && key != "enabled" {
         let text = setting.as_str().ok_or("Network settings must be text")?;
         if key == "serverSteamId"
@@ -223,7 +249,12 @@ pub(crate) fn save_setting(
         } else if module == "updates.recycleBin" {
             config["modules"]["updates"]["recycleBin"][key] = setting.clone();
         } else {
-            config["modules"][module][key] = setting.clone();
+            config["modules"][module][key] = normalized_setting
+                .clone()
+                .unwrap_or_else(|| setting.clone());
+        }
+        if key == "toggleKey" || (key == "enabled" && setting == &serde_json::Value::Bool(true)) {
+            shroudforge_package::validate_hotkey_configuration(root, config, None)?;
         }
         Ok(())
     })

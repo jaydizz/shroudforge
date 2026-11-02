@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "creative-mode",
+  "modId": "creative",
+  "packageDirectory": "creative",
+  "name": "Creative Mode",
+  "target": "both",
+  "modJson": {
+    "authors": ["Phoenix1355"]
+  },
+  "extendedModJson": {
+    "schemaVersion": 1,
+    "targets": ["client", "server"],
+    "launcher": "EML",
+    "links": {
+      "issues": "https://www.nexusmods.com/enshrouded/mods/146?tab=posts"
+    }
+  },
+  "files": [
+    {
+      "path": "creative.dll",
+      "mode": "library"
+    }
+  ]
+}

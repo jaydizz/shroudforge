@@ -1,8 +1,108 @@
-use crate::config::{validate_document, validate_settings};
+use crate::config::validate_settings;
 use crate::read_mod_settings::parse_setting_definition;
-use crate::{ModManifest, SettingGroup, validate_manifest};
+use crate::{ModManifest, SettingGroup, SettingPreset, validate_manifest};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+
+const MOD_FIELDS: &[&str] = &[
+    "$schema",
+    "id",
+    "name",
+    "version",
+    "description",
+    "authors",
+    "license",
+    "icon",
+    "dependencies",
+    "capabilities",
+];
+
+const EXTENDED_MOD_FIELDS: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "enabled",
+    "targets",
+    "launcher",
+    "links",
+    "changelog",
+    "settings",
+    "groups",
+    "presets",
+    "inputReservations",
+];
+
+fn unknown_manifest_fields_allowed(root: &Path) -> Result<bool, String> {
+    let config = shroudforge_loader_config::config::read_loader(root)?;
+    let detection = &config["modules"]["modDetection"];
+    Ok(detection["enabled"].as_bool().unwrap_or(true)
+        && detection["tolerateUnknownManifestFields"]
+            .as_bool()
+            .unwrap_or(true))
+}
+
+fn validate_mod_document(root: &Path, value: &Value, allow_unknown: bool) -> Result<Value, String> {
+    validate_known_fields(
+        root,
+        crate::documents::MOD,
+        value,
+        MOD_FIELDS,
+        allow_unknown,
+    )
+}
+
+pub(crate) fn validate_extended_mod_document(root: &Path, value: &Value) -> Result<Value, String> {
+    let allow_unknown = unknown_manifest_fields_allowed(root)?;
+    validate_extended_mod_document_with_policy(root, value, allow_unknown)
+}
+
+fn validate_extended_mod_document_with_policy(
+    root: &Path,
+    value: &Value,
+    allow_unknown: bool,
+) -> Result<Value, String> {
+    validate_known_fields(
+        root,
+        crate::documents::EXTENDED_MOD,
+        value,
+        EXTENDED_MOD_FIELDS,
+        allow_unknown,
+    )
+}
+
+fn validate_known_fields(
+    root: &Path,
+    document: shroudforge_loader_config::Document,
+    value: &Value,
+    known_fields: &[&str],
+    allow_unknown: bool,
+) -> Result<Value, String> {
+    let mut normalized = value.clone();
+    let object = normalized
+        .as_object_mut()
+        .ok_or_else(|| format!("{} must be an object", document.name))?;
+    let unknown: Vec<_> = object
+        .keys()
+        .filter(|key| !known_fields.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    if !allow_unknown && !unknown.is_empty() {
+        return Err(format!(
+            "{}: unknown field{}: {}. Enable Mod Detection to ignore unknown top-level fields.",
+            document.name,
+            if unknown.len() == 1 { "" } else { "s" },
+            unknown.join(", ")
+        ));
+    }
+    for key in unknown {
+        object.remove(&key);
+    }
+    crate::config::validate_document(root, document, &normalized)?;
+    Ok(normalized)
+}
+
 pub fn parse_manifest(root: &Path, value: Value) -> Result<ModManifest, String> {
     parse_manifest_with_extension(root, value, None)
 }
@@ -13,14 +113,19 @@ pub fn parse_manifest_with_extension(
     external: Option<Value>,
 ) -> Result<ModManifest, String> {
     let had_extension = external.is_some();
-    let mut extension = external;
+    let allow_unknown = unknown_manifest_fields_allowed(root)?;
+    let extension = external
+        .map(|extension| {
+            validate_extended_mod_document_with_policy(root, &extension, allow_unknown)
+        })
+        .transpose()?;
+    let mut extension = extension;
     if let Some(extension) = extension.as_mut() {
-        validate_document(root, crate::documents::EXTENDED_MOD, extension)?;
         if let Some(object) = extension.as_object_mut() {
             object.remove("$schema");
         }
     }
-    validate_document(root, crate::documents::MOD, &value)?;
+    value = validate_mod_document(root, &value, allow_unknown)?;
     let extension = extension.unwrap_or_else(|| json!({}));
     let enabled = extension
         .get("enabled")
@@ -84,6 +189,14 @@ pub fn parse_manifest_with_extension(
         })
         .transpose()?
         .unwrap_or_default();
+    let presets = extension
+        .get("presets")
+        .map(|value| {
+            serde_json::from_value::<BTreeMap<String, SettingPreset>>(value.clone())
+                .map_err(|error| format!("extended.mod.json presets: {error}"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let object = value.as_object_mut().ok_or("mod.json must be an object")?;
     object.remove("$schema");
     object.insert("enabled".into(), json!(enabled));
@@ -92,8 +205,8 @@ pub fn parse_manifest_with_extension(
         serde_json::to_value(target).map_err(|error| error.to_string())?,
     );
     object.insert("settingValues".into(), Value::Object(effective));
-    object.insert("settings".into(), json!(definitions));
     object.insert("groups".into(), json!(groups));
+    object.insert("presets".into(), json!(presets));
     object.insert(
         "changelog".into(),
         extension
@@ -105,6 +218,14 @@ pub fn parse_manifest_with_extension(
         "links".into(),
         extension.get("links").cloned().unwrap_or_else(|| json!({})),
     );
+    let input_contexts = crate::read_input_reservations::read_input_reservations(
+        extension.get("inputReservations"),
+        &mut definitions,
+    )?;
+    if !input_contexts.is_empty() {
+        object.insert("inputContexts".into(), json!(input_contexts));
+    }
+    object.insert("settings".into(), json!(definitions));
     let mut manifest: ModManifest =
         serde_json::from_value(value).map_err(|error| error.to_string())?;
     for setting in &mut manifest.settings {

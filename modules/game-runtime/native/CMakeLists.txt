@@ -139,6 +139,7 @@ add_library(kfc-runtime SHARED
     engine-context/track_world_context.cpp
     player-input/sample_world_cursor.cpp
     player-input/read_local_cursor_input.cpp
+    player-input/read_local_camera.cpp
     voxels/read_and_write_voxels.cpp
     voxels/read_registered_voxel_grid.cpp
     building/remove_building_prop.cpp
@@ -154,6 +155,10 @@ add_library(kfc-runtime SHARED
     impact/submit_entity_destruction.cpp
     impact/submit_building_prop_spawn.cpp
     voxels/write_registered_voxel_grid.cpp
+    main-menu/resolve_main_menu.cpp
+    main-menu/resolve_character_selection.cpp
+    main-menu/resolve_game_flow.cpp
+    main-menu/manage_native_main_menu.cpp
     host/manage_runtime_lifecycle.cpp
     code-inventory/export_function_inspection.cpp
     code-inventory/resolve_original_call_graph.cpp

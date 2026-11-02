@@ -9,14 +9,14 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = resolve(scriptDirectory, '../..')
 const localeDirectory = resolve(repositoryRoot, 'modules/ui-resources/locales')
 const outputPath = resolve(repositoryRoot, 'build/ui/modloader-inputs/crowdin-progress.json')
-const sourceLocale = 'en'
+const sourceLocale = 'en-GB'
 const localeFiles = (await readdir(localeDirectory))
   .filter((file) => extname(file).toLowerCase() === '.json')
   .map((file) => basename(file, extname(file)))
   .sort((left, right) => left.localeCompare(right))
 
 if (!localeFiles.includes(sourceLocale)) {
-  throw new Error('Missing source locale: modules/ui-resources/locales/en.json')
+  throw new Error('Missing source locale: modules/ui-resources/locales/en-GB.json')
 }
 
 const targetLocales = localeFiles.filter((locale) => locale !== sourceLocale)
@@ -130,12 +130,14 @@ if (!token) {
     if (!isRecord(item)) return null
     const value = isRecord(item.data) ? item.data : item
     const language = isRecord(value.language) ? value.language : {}
+    // Match Crowdin language identifiers and filename codes, not the locale
+    // fallback. Crowdin's generic `en` language reports locale `en-US`, which
+    // would collide with the distinct `en-US` target language.
     const codes = [
-      language.locale,
       language.id,
+      value.languageId,
       language.twoLettersCode,
       language.editorCode,
-      value.languageId,
     ]
 
     for (const code of codes) {

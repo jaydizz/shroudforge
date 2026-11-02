@@ -28,6 +28,14 @@ KFC_RUNTIME_API void KFC_RUNTIME_CALL KfcRuntimeTick(void);
 KFC_RUNTIME_API void KFC_RUNTIME_CALL KfcRuntimeShutdown(void);
 KFC_RUNTIME_API void KFC_RUNTIME_CALL KfcRuntimeStatus(char* buffer, size_t capacity);
 KFC_RUNTIME_API void KFC_RUNTIME_CALL KfcRuntimeDiagnostics(char* buffer, size_t capacity);
+/* Optional ABI-12 selected-character cache. Returns required UTF-8 bytes
+ * including NUL, or zero when unavailable. Copies only a complete name.
+ * This getter never reads game memory or refreshes the cached selection. */
+KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeSelectedCharacterName(char* buffer, size_t capacity);
+/* Optional ABI-12 original GameFlow snapshot, refreshed by the existing native
+ * lifecycle tick. 0 unknown/transition, 1 PreGame/menu, 2 validated other state.
+ * This getter only copies the cache and never reads game memory. */
+KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeMainMenuState(void);
 /* Optional Steam Networking Messages transport used by runtime.network. */
 KFC_RUNTIME_API int32_t KFC_RUNTIME_CALL KfcRuntimeNetworkStatus(uint64_t* local_steam_id);
 /* Registers an ISteamNetworkingMessages session-request callback without
@@ -283,6 +291,24 @@ KFC_RUNTIME_API bool KFC_RUNTIME_CALL KfcRuntimeWorldCursorRead(
 KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeWorldCursorReadInput(
     size_t component_size, uint64_t expected_session, uint8_t* buffer,
     size_t capacity, uint64_t* sequence);
+/* Optional. How the last scan chose among several player inputs (multiplayer:
+   one ClientPlayerInput per player), or what it tried when it could not.
+   Returns the text length. */
+KFC_RUNTIME_API size_t KFC_RUNTIME_CALL KfcRuntimeWorldCursorInputDetail(char* buffer, size_t capacity);
+
+/* Optional. The local client's camera and building cursor, from the same
+   ClientPlayerInput sample as the local cursor, for a caller drawing every
+   frame. The mod runtime sets the reflected layout once: component size and
+   9 byte offsets (camera position x, y, z as Q32.32 int64; orientation x, y,
+   z, w; fovY; aspectRatio as float), or 17 offsets (then the cursor's
+   position, orientation and flags) followed by the flags' width in bytes.
+   Read writes 9 doubles (camera, position in meters) and, when count is 17
+   or more, 8 more (cursor position in meters, orientation, flags; flags -1
+   without the cursor). Results as KfcRuntimeWorldCursorReadInput, and 3
+   while no layout was set. */
+KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeSetLocalCameraLayout(
+    size_t component_size, const uint32_t* offsets, size_t count);
+KFC_RUNTIME_API uint32_t KFC_RUNTIME_CALL KfcRuntimeReadLocalCamera(double* output, size_t count);
 /* Optional ABI-12 client input extension. Exact build only. Dispatch is not a
    replicated-world acknowledgement. kind: select=0, place=1, remove=2, undo=3.
    Status: unknown=0, queued=1, pressed=2, dispatched=3, timeout=4, cancelled=5. */

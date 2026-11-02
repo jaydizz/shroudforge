@@ -14,6 +14,7 @@ import { useUiUpdates } from './receive-ui-updates'
 import { TopBar } from './show-top-bar'
 import { Page } from './show-page'
 import { UiErrorBoundary } from './show-ui-error'
+import { compatibilityNavigationStatus } from './show-compatibility'
 import { PageZoomProvider } from '../../ui-resources/show-page-header'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
@@ -23,10 +24,15 @@ export function App() {
   const [data, setData] = useState<Snapshot>(empty)
   const [page, setPage] = useState<PageId>('news')
   const [selectedMod, setSelectedMod] = useState<string | null>(null)
+  const [selectedWikiArticle, setSelectedWikiArticle] = useState<string | null>(null)
   const [chirper, setChirper] = useState(false)
   const [settings, setSettings] = useState<Settings>(empty.settings)
   const [read, setRead] = useState<string[]>([])
-  const { message: saveMessage, notifyCommandResult } = useCommandToasts()
+  const {
+    message: saveMessage,
+    notifyCommandResult,
+    dismissCommandToast,
+  } = useCommandToasts()
   useUiUpdates({
     data,
     setData,
@@ -57,7 +63,13 @@ export function App() {
   const activeMod = data.mods.find((mod) => mod.id === selectedMod)
   const navigate = (next: PageId) => {
     setSelectedMod(null)
+    setSelectedWikiArticle(null)
     setPage(next)
+  }
+  const openWikiArticle = (articleId: string) => {
+    setSelectedMod(null)
+    setSelectedWikiArticle(articleId)
+    setPage('wiki')
   }
   const savePageZoom = (zoomPercent: number) => {
     setSettings((current) => ({ ...current, zoomPercent }))
@@ -88,7 +100,11 @@ export function App() {
 
   return (
     <main className="shell">
-      <Toasts errors={data.configuration?.errors} message={saveMessage} />
+      <Toasts
+        errors={data.configuration?.errors}
+        message={saveMessage}
+        onDismissMessage={dismissCommandToast}
+      />
       <TopBar
         data={data}
         unread={unread.length}
@@ -120,6 +136,7 @@ export function App() {
               <Nav
                 icon="compatibility"
                 label={t('nav.compatibility')}
+                status={compatibilityNavigationStatus(data)}
                 active={!activeMod && page === 'compatibility'}
                 onClick={() => navigate('compatibility')}
               />
@@ -128,6 +145,12 @@ export function App() {
                 label={t('nav.settings')}
                 active={!activeMod && page === 'settings'}
                 onClick={() => navigate('settings')}
+              />
+              <Nav
+                icon="wiki"
+                label={t('nav.wiki')}
+                active={!activeMod && page === 'wiki'}
+                onClick={() => navigate('wiki')}
               />
             </NavGroup>
             <NavGroup title={t('nav.modsManagement')}>
@@ -176,6 +199,7 @@ export function App() {
           <section className="content">
             {activeMod ? (
               <ModPage
+                key={activeMod.id}
                 mod={activeMod}
                 status={data.configuration?.modStates?.[activeMod.id]}
                 dependencyStates={data.configuration?.modStates || {}}
@@ -187,6 +211,9 @@ export function App() {
                 settings={settings}
                 setSettings={setSettings}
                 news={news}
+                wikiArticleId={selectedWikiArticle}
+                selectWikiArticle={setSelectedWikiArticle}
+                openWikiArticle={openWikiArticle}
                 unread={unread}
                 read={read}
                 markRead={markRead}
@@ -209,6 +236,10 @@ export function App() {
           }}
           markRead={markRead}
           runNoticeAction={runNoticeAction}
+          openWikiArticle={(articleId) => {
+            setChirper(false)
+            openWikiArticle(articleId)
+          }}
         />
       )}
     </main>

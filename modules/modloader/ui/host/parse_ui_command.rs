@@ -1,4 +1,6 @@
 use super::loader_settings_input::UiSettings;
+use super::record_ui_log::UiLogEvent;
+use shroudforge_package::HotkeyAssessmentTarget;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
@@ -27,6 +29,8 @@ pub(crate) struct UiCommand {
     pub(crate) job_id: Option<String>,
     #[serde(default)]
     pub(crate) enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device: Option<shroudforge_hotkeys::InputDevice>,
     #[serde(default)]
     pub(crate) ids: Option<Vec<String>>,
     #[serde(default)]
@@ -47,6 +51,8 @@ pub(crate) struct UiCommand {
     pub(crate) title: Option<String>,
     #[serde(default)]
     pub(crate) message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) event: Option<UiLogEvent>,
     #[serde(default)]
     pub(crate) scope: Option<String>,
     #[serde(default)]
@@ -77,7 +83,15 @@ pub(crate) enum Command {
     ReloadSettings(String),
     OpenUrl(String, String),
     SetModEnabled(String, bool, String, String),
+    SaveKeyReservation(
+        String,
+        String,
+        shroudforge_hotkeys::InputDevice,
+        bool,
+        String,
+    ),
     SaveModSettings(String, serde_json::Value, String, String),
+    AssessHotkey(HotkeyAssessmentTarget, String),
     SaveSettings(UiSettings, String),
     SaveSetting(String, Option<String>, String, serde_json::Value, String),
     BrowsePath(String, String),
@@ -90,6 +104,7 @@ pub(crate) enum Command {
     Diagnostics(String, Option<String>, String),
     UiReady,
     UiError(String),
+    UiLog(UiLogEvent),
 }
 
 pub(crate) fn parse_ui_command(value: UiCommand, desktop: bool, server: bool) -> Option<Command> {
@@ -138,6 +153,33 @@ pub(crate) fn parse_ui_command(value: UiCommand, desktop: bool, server: bool) ->
             ),
             _ => return None,
         },
+        "save-key-reservation" => match (value.mod_id, value.key, value.device, value.enabled) {
+            (Some(id), Some(key), Some(device), Some(reserved)) => Command::SaveKeyReservation(
+                id,
+                key,
+                device,
+                reserved,
+                value.request_id.unwrap_or_default(),
+            ),
+            _ => return None,
+        },
+        "assess-hotkey" => {
+            let target = match value.scope.as_deref() {
+                Some("module") if value.key.as_deref() == Some("toggleKey") => {
+                    HotkeyAssessmentTarget::Module {
+                        module: value.module?,
+                        binding: value.value,
+                    }
+                }
+                Some("mod") => HotkeyAssessmentTarget::Mod {
+                    id: value.mod_id?,
+                    key: value.key?,
+                    values: value.values?,
+                },
+                _ => return None,
+            };
+            Command::AssessHotkey(target, value.request_id.unwrap_or_default())
+        }
         "set-mod-enabled" => match (value.mod_id, value.enabled) {
             (Some(id), Some(enabled)) => Command::SetModEnabled(
                 id,
@@ -187,6 +229,7 @@ pub(crate) fn parse_ui_command(value: UiCommand, desktop: bool, server: bool) ->
             value.request_id.unwrap_or_default(),
         ),
         "ui-ready" => Command::UiReady,
+        "ui-log" => Command::UiLog(value.event?),
         "ui-error" => Command::UiError(
             value
                 .message

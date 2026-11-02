@@ -13,9 +13,18 @@ impl IngameRuntime {
             "running":running,"active":if running {self.active_mod_ids()}else{Vec::new()},
             "loaded":self.loaded,"errors":self.errors,
             "effects":state.runtime_effects(),
+            "dllPlan":crate::native_dlls::applied_plan(),
             "runtimeProvider":provider
         });
-        if let Err(error) = shroudforge_loader_config::config::write_document(
+        // Off the mods' loop while running; the final status at once.
+        if running {
+            shroudforge_loader_config::config::write_document_in_background(
+                &self.root,
+                shroudforge_runtime_diagnostics::documents::MOD_STATUS,
+                value,
+                |error| tracing::error!(target:"shroudforge::runtime","status publication failed: {error}"),
+            );
+        } else if let Err(error) = shroudforge_loader_config::config::write_document_now(
             &self.root,
             shroudforge_runtime_diagnostics::documents::MOD_STATUS,
             &value,

@@ -2,11 +2,19 @@ use crate::config::*;
 use serde_json::Value;
 use std::{fs, path::Path};
 
+pub fn read_loader_defaults() -> Result<Value, String> {
+    serde_json::from_str(include_str!("loader.default.json")).map_err(|error| error.to_string())
+}
+
 pub fn read_loader(root: &Path) -> Result<Value, String> {
+    let result = read_loader_unvalidated(root)?;
+    validate_document(root, crate::documents::LOADER, &result)?;
+    Ok(result)
+}
+
+pub(crate) fn read_loader_unvalidated(root: &Path) -> Result<Value, String> {
     let path = document_path(root, crate::documents::LOADER);
-    let defaults: Value = serde_json::from_str(include_str!("loader.default.json"))
-        .map_err(|error| error.to_string())?;
-    let mut result = defaults;
+    let mut result = read_loader_defaults()?;
     let mut loaded = match fs::read(&path) {
         Ok(bytes) => {
             Some(serde_json::from_slice::<Value>(&bytes).map_err(|error| error.to_string())?)
@@ -116,6 +124,7 @@ pub fn read_loader(root: &Path) -> Result<Value, String> {
         {
             system.remove("channel");
         }
+        migrate_legacy_hotkeys(loaded, &result)?;
     }
     fn merge(target: &mut Value, source: Value) {
         match (target, source) {
@@ -139,8 +148,97 @@ pub fn read_loader(root: &Path) -> Result<Value, String> {
             settings.insert("jobId".into(), "runtime.overview".into());
         }
     }
-    validate_document(root, crate::documents::LOADER, &result)?;
     Ok(result)
+}
+
+fn migrate_legacy_hotkeys(loaded: &mut Value, defaults: &Value) -> Result<(), String> {
+    let Some(hotkeys) = loaded
+        .pointer_mut("/hotkeys")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    let Some(legacy) = hotkeys.remove("protectedKeys") else {
+        return Ok(());
+    };
+    let legacy = legacy
+        .as_array()
+        .ok_or("hotkeys.protectedKeys must be an array")?;
+    let mut confirm = match hotkeys.remove("confirm") {
+        Some(Value::Array(keys)) => keys,
+        Some(_) => return Err("hotkeys.confirm must be an array".into()),
+        None => Vec::new(),
+    };
+    let mut cancel = match hotkeys.remove("cancel") {
+        Some(Value::Array(keys)) => keys,
+        Some(_) => return Err("hotkeys.cancel must be an array".into()),
+        None => Vec::new(),
+    };
+
+    for value in legacy {
+        let mut entry = value
+            .as_object()
+            .cloned()
+            .ok_or("hotkeys.protectedKeys entries must be objects")?;
+        let action = entry
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or("legacy protected hotkey is missing its action")?;
+        let scancode = entry
+            .get("scancode")
+            .and_then(Value::as_u64)
+            .ok_or("legacy protected hotkey is missing its scancode")?;
+        let group = if action == "confirm" {
+            "confirm"
+        } else {
+            "cancel"
+        };
+        let keys = if group == "confirm" {
+            &mut confirm
+        } else {
+            &mut cancel
+        };
+        if keys
+            .iter()
+            .any(|key| key["scancode"].as_u64() == Some(scancode))
+        {
+            continue;
+        }
+
+        let default_entry = defaults
+            .pointer(&format!("/hotkeys/{group}"))
+            .and_then(Value::as_array)
+            .and_then(|keys| {
+                keys.iter()
+                    .find(|key| key["scancode"].as_u64() == Some(scancode))
+            });
+        let (fallback_emoji, fallback_text) = if group == "confirm" {
+            ("⚠️", "Another application may use {key}. Assign it anyway?")
+        } else {
+            (
+                "↩️",
+                "Pressing {key} cancels recording and keeps the current assignment.",
+            )
+        };
+        entry.remove("action");
+        entry.entry("emoji").or_insert_with(|| {
+            default_entry
+                .and_then(|key| key.get("emoji"))
+                .cloned()
+                .unwrap_or_else(|| Value::String(fallback_emoji.into()))
+        });
+        entry.entry("text").or_insert_with(|| {
+            default_entry
+                .and_then(|key| key.get("text"))
+                .cloned()
+                .unwrap_or_else(|| Value::String(fallback_text.into()))
+        });
+        keys.push(Value::Object(entry));
+    }
+
+    hotkeys.insert("confirm".into(), Value::Array(confirm));
+    hotkeys.insert("cancel".into(), Value::Array(cancel));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -167,7 +265,10 @@ mod tests {
         ] {
             assert_eq!(config["modules"][module]["enabled"], true, "{module}");
         }
-        assert_eq!(crate::config::window_state(root.path()), serde_json::json!({}));
+        assert_eq!(
+            crate::config::window_state(root.path()),
+            serde_json::json!({})
+        );
     }
 
     #[test]

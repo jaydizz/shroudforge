@@ -10,7 +10,7 @@ import { SettingSwitch } from '../../ui-resources/edit-setting'
 import { ModIcon } from './show-mod-icon'
 import { DependencyList } from './show-mod-dependencies'
 import { ModActionButton } from './run-mod-action'
-import { ModSetting } from './edit-mod-setting'
+import { ModSetting, settingIsEnabled } from './edit-mod-setting'
 import { useModSettings } from './save-mod-settings'
 import linkOrder from '../mod_link_order.json'
 
@@ -58,13 +58,15 @@ export function ModPage({
             ? 'unknown'
             : status?.state === 'failed'
               ? 'error'
-              : status?.state === 'waiting-world'
-                ? 'waiting'
-                : status?.state === 'not-running'
-                  ? 'notRunning'
-                  : !status || status?.state === 'unconfirmed'
-                    ? 'unknown'
-                    : 'running'
+              : status?.state === 'ready'
+                ? 'ready'
+                : status?.state === 'waiting-world'
+                  ? 'waiting'
+                  : status?.state === 'not-running'
+                    ? 'notRunning'
+                    : !status || status?.state === 'unconfirmed'
+                      ? 'unknown'
+                      : 'running'
   const stateLabel = t(
     disablePending
       ? 'mod.mode.disablePending'
@@ -196,8 +198,24 @@ export function ModPage({
                       key={definition.key}
                       definition={definition}
                       value={values[definition.key]}
+                      assessmentTarget={{
+                        scope: 'mod',
+                        modId: mod.id,
+                        key: definition.key,
+                        revision: mod.revision,
+                        values,
+                      }}
                       disabled={!settingIsEnabled(definition, settings, values)}
                       onChange={(value) => updateSetting(definition.key, value)}
+                      contexts={mod.inputContexts}
+                      onReserve={(device, reserved) =>
+                        postRequest('save-key-reservation', {
+                          modId: mod.id,
+                          key: definition.key,
+                          device,
+                          enabled: reserved,
+                        })
+                      }
                     />
                   ))}
               </div>
@@ -291,23 +309,6 @@ export function formatAuthors(authors: string[]) {
   return authors.length < 2
     ? authors[0] || ''
     : `${authors.slice(0, -1).join(', ')} & ${authors.at(-1)}`
-}
-
-function settingIsEnabled(
-  definition: SettingDefinition,
-  settings: SettingDefinition[],
-  values: Record<string, unknown>,
-  seen = new Set<string>(),
-): boolean {
-  const condition = definition.enabledWhen
-  if (!condition) return true
-  if (seen.has(definition.key)) return false
-  if (values[condition.setting] !== condition.equals) return false
-  const controller = settings.find((setting) => setting.key === condition.setting)
-  if (!controller) return false
-  const nextSeen = new Set(seen)
-  nextSeen.add(definition.key)
-  return settingIsEnabled(controller, settings, values, nextSeen)
 }
 
 export const linkDefinitions = Object.fromEntries(

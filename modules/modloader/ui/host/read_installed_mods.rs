@@ -6,7 +6,7 @@ use shroudforge_package::package_lookup::mod_ecosystem_for_package;
 use std::fs;
 use std::path::Path;
 
-pub(crate) fn read_mods(root: &Path) -> Vec<ModInfo> {
+pub(crate) fn read_mods(root: &Path, locale: &str) -> Vec<ModInfo> {
     let Ok(entries) = fs::read_dir(shroudforge_loader_config::paths::mods_dir(root)) else {
         return Vec::new();
     };
@@ -26,6 +26,7 @@ pub(crate) fn read_mods(root: &Path) -> Vec<ModInfo> {
         .filter_map(|entry| {
             let package = entry.path();
             shroudforge_package::config::read_manifest_path(root, &package)
+                .map(|manifest| shroudforge_package::localized_manifest(&manifest, locale))
                 .and_then(|manifest| {
                     serde_json::to_value(manifest)
                         .map(|value| (package, value))
@@ -173,6 +174,10 @@ pub(crate) fn read_mods(root: &Path) -> Vec<ModInfo> {
                 .and_then(|value| value.as_array())
                 .cloned()
                 .unwrap_or_default(),
+            presets: value
+                .get("presets")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
             changelog: value
                 .get("changelog")
                 .and_then(|value| value.as_array())
@@ -187,6 +192,10 @@ pub(crate) fn read_mods(root: &Path) -> Vec<ModInfo> {
             assets,
             setting_values: config
                 .get("settings")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+            input_contexts: value
+                .get("inputContexts")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({})),
         });

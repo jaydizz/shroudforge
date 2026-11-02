@@ -97,6 +97,7 @@ pub(super) type CompareExchange = unsafe extern "C" fn(
 pub(super) type WorldOperationAvailable = unsafe extern "C" fn(*const c_char) -> bool;
 pub(super) type WorldContextActive = unsafe extern "C" fn() -> bool;
 pub(super) type WorldContextKind = unsafe extern "C" fn() -> u32;
+pub(super) type MainMenuState = unsafe extern "C" fn() -> u32;
 pub(super) type WorldSessionId = unsafe extern "C" fn() -> u64;
 pub(super) type WorldEntityContextReady = unsafe extern "C" fn() -> bool;
 pub(super) type WorldEntityQueryProps =
@@ -121,8 +122,11 @@ pub struct GridSpec {
 pub(super) type WorldGridGetSpecForSession =
     unsafe extern "C" fn(u64, *const c_char, *mut GridSpec) -> u32;
 pub(super) type WorldCursorRead = unsafe extern "C" fn(*mut u8, usize, *mut u64) -> bool;
+pub(super) type SetLocalCameraLayout = unsafe extern "C" fn(usize, *const u32, usize) -> u32;
+pub(super) type ReadLocalCamera = unsafe extern "C" fn(*mut f64, usize) -> u32;
 pub(super) type WorldCursorReadInput =
     unsafe extern "C" fn(usize, u64, *mut u8, usize, *mut u64) -> u32;
+pub(super) type WorldCursorInputDetail = unsafe extern "C" fn(*mut u8, usize) -> usize;
 pub(super) type WorldVoxelReadForSession =
     unsafe extern "C" fn(u64, *const i32, *const u32, *mut u16, usize, *mut usize) -> u32;
 pub(super) type WorldVoxelWrite =
@@ -179,7 +183,10 @@ pub(super) struct Provider {
     pub(super) world_entity_identity: WorldEntityIdentity,
     pub(super) world_entity_set_scale: WorldEntitySetScale,
     pub(super) world_cursor_read: Option<WorldCursorRead>,
+    pub(super) set_local_camera_layout: Option<SetLocalCameraLayout>,
+    pub(super) read_local_camera: Option<ReadLocalCamera>,
     pub(super) world_cursor_read_input: Option<WorldCursorReadInput>,
+    pub(super) world_cursor_input_detail: Option<WorldCursorInputDetail>,
     pub(super) world_voxel_read_for_session: Option<WorldVoxelReadForSession>,
     pub(super) world_voxel_write: WorldVoxelWrite,
     pub(super) world_grid_get_spec_for_session: Option<WorldGridGetSpecForSession>,
@@ -192,4 +199,6 @@ pub(super) struct Provider {
     pub(super) runtime_patch_set_enabled: RuntimePatchSetEnabled,
     pub(super) abi: u32,
     pub(super) status: unsafe extern "C" fn(*mut c_char, usize),
+    pub(super) selected_character_name: Option<Registry>,
+    pub(super) main_menu_state: Option<MainMenuState>,
 }

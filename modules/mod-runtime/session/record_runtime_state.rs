@@ -9,15 +9,16 @@ impl AppState {
             active_mods.remove(id);
         }
         drop(active_mods);
+        // The mod's DLLs read game state under the same condition as its Lua.
+        let runtime = self.env().mod_registry().get(id).is_some_and(|r#mod| {
+            r#mod.info().capabilities.contains(&mod_loader::Capability::Runtime)
+        });
+        crate::native_bridge::set_game_access(id, active && runtime && self.is_client());
         if !active {
             self.loaded_resource_indexes.borrow_mut().remove_owner(id);
         }
-        if let Some(state) = native_dll_state {
-            let detail = match state {
-                "loading" => "native DLL is still loading",
-                _ => "native DLL remains loaded for this game session",
-            };
-            self.report_runtime_effect(id, state, detail);
+        if let Some(status) = native_dll_state {
+            self.report_native_dll_effect(&status);
         } else {
             let mut effects = self.runtime_effects.borrow_mut();
             if effects

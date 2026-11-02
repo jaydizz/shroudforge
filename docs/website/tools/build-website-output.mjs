@@ -20,7 +20,7 @@ const schemasDirectory = path.join(outputDirectory, "schemas");
 const output = path.join(dataDirectory, "api.json");
 const version = fs.readFileSync(path.join(root, "VERSION"), "utf8").trim();
 fs.mkdirSync(schemasDirectory, { recursive: true });
-for (const name of ["manifest.schema.json", "extended.mod.schema.json"]) {
+for (const name of ["manifest.schema.json", "extended.mod.schema.json", "mod-locale.schema.json"]) {
   fs.copyFileSync(
     path.join(root, "modules", "modloader", "manifest", name),
     path.join(schemasDirectory, name),
@@ -52,9 +52,11 @@ const classAliases = {
   ShroudForgeLogApi: "shroudforge.log",
   ShroudForgeNotification: "shroudforge.notifications.Notice",
   ShroudForgeNotifications: "shroudforge.notifications",
+  ShroudForgeI18n: "shroudforge.i18n",
   ShroudForgeSettings: "shroudforge.settings",
   ShroudForgeUi: "shroudforge.ui",
   ShroudForgeInput: "shroudforge.input",
+  ShroudForgeNative: "shroudforge.native",
   TypeRegistry: "game.types",
 };
 
@@ -437,8 +439,10 @@ function publicName(name) {
     ["log.", "shroudforge.log."],
     ["shroudforge_notifications.", "shroudforge.notifications."],
     ["shroudforge_input.", "shroudforge.input."],
+    ["shroudforge_i18n.", "shroudforge.i18n."],
     ["shroudforge_settings.", "shroudforge.settings."],
     ["shroudforge_ui.", "shroudforge.ui."],
+    ["shroudforge_native.", "shroudforge.native."],
   ];
   const alias = aliases.find(([internal]) => name.startsWith(internal));
   return alias ? alias[1] + name.slice(alias[0].length) : name;

@@ -13,6 +13,7 @@ import { ActivityPage } from '../../logging/ui/show-activity'
 import { Compatibility } from './show-compatibility'
 import { RecycleBin } from '../../updater/ui/show-recycle-bin'
 import type { UpdaterCommand } from '../../updater/ui/update-types'
+import { WikiPage } from '../../wiki/ui/show-wiki'
 
 export function Page({
   id,
@@ -20,6 +21,9 @@ export function Page({
   settings,
   setSettings,
   news,
+  wikiArticleId,
+  selectWikiArticle,
+  openWikiArticle,
   unread,
   read,
   markRead,
@@ -33,6 +37,9 @@ export function Page({
   settings: Settings
   setSettings(v: Settings): void
   news: NewsItem[]
+  wikiArticleId: string | null
+  selectWikiArticle(articleId: string | null): void
+  openWikiArticle(articleId: string): void
   unread: NewsItem[]
   read: string[]
   markRead(ids: string[], isRead?: boolean): void
@@ -51,6 +58,7 @@ export function Page({
         read={read}
         markRead={markRead}
         runNoticeAction={runNoticeAction}
+        openWikiArticle={openWikiArticle}
       />
     )
   if (id === 'discover')
@@ -106,6 +114,13 @@ export function Page({
             kind: 'open-debug-console',
           })
         }
+      />
+    )
+  if (id === 'wiki')
+    return (
+      <WikiPage
+        selectedArticleId={wikiArticleId}
+        onSelectArticle={selectWikiArticle}
       />
     )
   return (

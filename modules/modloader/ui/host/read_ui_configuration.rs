@@ -1,15 +1,18 @@
 use super::ui_snapshot_types::ModuleConfig;
 use super::ui_snapshot_types::UserConfig;
-use super::window::DEFAULT_TOGGLE_KEY;
 use shroudforge_package::config_revision;
 use std::path::Path;
 
-pub(crate) fn default_toggle_key() -> u32 {
-    DEFAULT_TOGGLE_KEY
+pub(crate) fn default_toggle_key() -> String {
+    shroudforge_loader_config::config::read_loader_defaults()
+        .expect("embedded loader defaults must be valid")["modules"]["modloaderUi"]["toggleKey"]
+        .as_str()
+        .expect("module hotkey default must be an SDL binding string")
+        .to_owned()
 }
 
 pub(crate) fn default_refresh() -> u64 {
-    1000
+    2000
 }
 
 pub(crate) fn load_module_config(root: &Path) -> Result<ModuleConfig, String> {

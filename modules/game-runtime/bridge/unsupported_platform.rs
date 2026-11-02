@@ -92,6 +92,12 @@ pub fn world_entity_context_ready() -> bool {
 pub fn world_cursor_read() -> Option<(Vec<u8>, u64)> {
     None
 }
+pub fn set_local_camera_layout(_: usize, _: &[u32]) -> bool {
+    false
+}
+pub fn read_local_camera(_: &mut [f64]) -> Option<u32> {
+    None
+}
 pub fn world_cursor_read_input(_: usize) -> Result<(Vec<u8>, u64), String> {
     Err("native local cursor access is available on Windows only".into())
 }
@@ -157,7 +163,13 @@ pub fn runtime_patch_set_enabled(_: &str, _: bool) -> Result<(), String> {
     Err("native runtime patches are available on Windows only".into())
 }
 pub fn report() -> serde_json::Value {
-    serde_json::json!({"available":false,"reason":"windows-runtime-only"})
+    serde_json::json!({"available":false,"reason":"windows-runtime-only","mainMenu":null})
+}
+pub fn selected_character_name() -> Option<String> {
+    None
+}
+pub fn is_main_menu() -> Option<bool> {
+    None
 }
 pub fn registry() -> Result<serde_json::Value, String> {
     Err("native component registry is available on Windows only".into())

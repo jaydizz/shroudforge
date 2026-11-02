@@ -22,11 +22,12 @@ modules/                       # Product modules and application entrypoints
   entrypoints/                # Loader application and Windows DLL entrypoints
   modloader/                  # Find, read, check and configure mods
     ui/                       # Modloader window and its views
-  player-name/                # Read the selected character name from the live Enshrouded UI
+  player-name/                # Resolve the Modloader name from the published native runtime cache
   updater/                    # Check, download and install updates
     ui/                       # Its update views
   loader-config/              # Read and save loader settings and state
   window-management/          # Shared native window sizing and geometry persistence
+  hotkeys/                    # SDL scancode bindings, keyboard observation, and shortcut field
   logging/                    # Write logs and display activity
   notifications/              # News, saved events, read state and toasts
   runtime-diagnostics/        # Selectable, time-limited runtime diagnostic jobs
@@ -40,8 +41,11 @@ modules/                       # Product modules and application entrypoints
   commands/                   # Existing command mode
   transport/                  # Steam messages and network health
   ui-resources/               # Shared display elements and translations
+  wiki/                       # Offline help articles, banners and article reader
+    articles/                 # One folder per article with locale Markdown and illustration
+    ui/                       # Article discovery, Wiki page and contextual help
   mod-runtime/                # Mod sessions, startup actions, callbacks and Lua bindings
-    session/                  # Own session state, assets and native mod handles
+    session/                  # Own session state, assets and Lua registrations
     startup/                  # Prepare and commit game-file mod changes
     ingame/                   # Start, update, reload and stop running mods
   game-files/                 # Original game files, restoration and asset transactions
@@ -81,7 +85,7 @@ The KFC parser is directly mounted at **kfc-parser/**. Cargo consumers use its l
 
 ## What happens when a mod loads?
 
-Installed mods are unpacked folders. A download archive is extracted by the installer. Its **mod.json** tells the loader its name, version, dependencies, and declared permissions. An optional **extended.mod.json** holds ShroudForge settings and extra details.
+Installed mods are unpacked folders. A download archive is extracted by the installer. Its **mod.json** tells the loader its name, version, dependencies, and declared permissions. An optional **extended.mod.json** holds ShroudForge settings and extra details. Optional **locales/<locale>.json** files translate mod-authored text for the selected Modloader language.
 
 ~~~mermaid
 flowchart TD
@@ -100,14 +104,18 @@ flowchart TD
     K --> L
 ~~~
 
-The manifest access declarations are **patch**, **export**, **runtime**, and **runtime-register-dll**. A mod lists the access it needs in **mod.json**. ShroudForge's in-game runtime APIs use **runtime**. **runtime-register-dll** schedules an EML mod that registers a package-local native DLL for the runtime. The registration API checks the current phase and package path, but does not check this specific capability.
+The manifest access declarations are **patch**, **export**, **runtime**, and **runtime-register-dll**. A mod lists the access it needs in **mod.json**. ShroudForge's in-game runtime APIs use **runtime**. **runtime-register-dll** schedules an EML mod that registers a package-local native DLL. The registration API retains its existing phase, activation and package checks without adding a new capability check. A `native-plugin.ini` declaration or an approved DLL Manager selection uses the common native load plan without requiring a Lua stub or a Lua registration capability. The DLL Manager switch, per-folder activation, process target and exclusions apply to every ShroudForge load route.
 
 Runtime mods have separate Lua environments. The loader selects a matching profile automatically or uses the player's selected profile. When the detected build differs, it reports a warning and enables operations that resolve against the live executable. When a mod stops, the loader asks it to clean up and releases its runtime handles.
+
+Native DLL handles are process-owned. `modules/modloader/dll_manager.rs` detects installed native components and resolves INI declarations, local selections, compatibility profiles and `dinput8-chain.ini` into one ordered plan. Chain entries must resolve inside a direct installed mod package. `mod_profiles.rs` reads data-only mod adapters independently of installed files. Manifest overlays preserve existing capabilities and add profile capabilities without duplicates. `modules/mod-runtime/native_dlls.rs` owns loading, canonical path deduplication, DirectInput provider registration and status. Ordinary DLLs own their internal startup. A DLL that belongs to a mod may also export `ShroudforgeModNativeInit` (`modules/mod-runtime/native_bridge/shroudforge_mod_native.h`): the loader calls it once after the load and the DLL registers functions that only the same mod's Lua code reaches through `shroudforge.native`. The bridge grants no game access. The bootstrap prepares this plan before releasing the game entrypoint. DLLs stay loaded until process exit, so changed native selections require a game restart. Reading the inventory never executes DLLs or rewrites mod files.
 
 ## The two mod information files
 
 - **mod.json** follows the EML format. It contains the mod's identity, version, dependencies, and permissions.
-- **extended.mod.json** is an optional ShroudForge file. It contains the enabled state, setting values, groups, actions, links, short update notes, and optional `launcher` provenance (`EML` or `SF`).
+- **extended.mod.json** is an optional ShroudForge file. It contains the enabled state, setting values, groups, actions, setting presets, links, short update notes, and optional `launcher` provenance (`EML` or `SF`). `validate_setting_presets.rs` checks presets when the manifest is read. `ui/apply-setting-presets.ts` applies a chosen preset, or selects its custom value, when a setting changes in the Modloader.
+
+Locale catalogs live at **locales/<locale>.json** inside the same mod folder. `read_mod_locale_catalogs.rs` validates them with `manifest/mod-locale.schema.json`. `resolve_mod_locale.rs` applies them to the Modloader manifest and resolves Lua strings. Lua reads the selected Modloader code through `shroudforge.locale()`.
 
 The UI treats a package without **extended.mod.json** as EML; ShroudForge mods always include the extension. If ShroudForge adds an extension to an EML package, it writes `launcher: "EML"` so the package keeps its original identity. When an extension exists, only that explicit marker is shown as EML; a missing or non-EML marker is shown as SF. The loader checks the extension against its schema before accepting the package.
 
@@ -121,6 +129,38 @@ Lua declarations and mod execution belong to **modules/mod-runtime/lua/**. EML v
 
 The [API reference](https://bonsaibauer.github.io/shroudforge/en/#api) is generated from the current function definitions. EML v1 keeps its established names and behavior. A breaking change to the ShroudForge API requires affected mods to be updated.
 
+Shortcuts use SDL3 scancodes and mouse button numbers in one setting string,
+such as `Ctrl+SDL:29|Mouse:4`. The shortcut editor has separate keyboard and mouse
+columns. Each device has at most one chord, with the keyboard first in storage.
+`modules/hotkeys/` owns parsing, SDL key names, observation, key capture and
+the shared 250 ms debounce gate for configured native UI window toggles. The
+Modloader, Debug Console and World Editor use the gate independently. Lua mod
+keybind queries continue to use raw press revisions.
+Its official SDL3 source submodule is `modules/hotkeys/SDL`, pinned to
+`release-3.4.18`. Cargo builds SDL statically through `modules/hotkeys/build.rs`
+and compiles `sdl_keyboard.c` against the upstream event types. The existing
+release package includes SDL's license and needs no separate SDL DLL.
+In-game Lua uses a hidden ShroudForge process for SDL keyboard observation and
+receives its states and labels over a pipe. It does not register Raw Input in
+Enshrouded's process. Dedicated servers do not start keyboard observation.
+`control: "keybind"` settings remain in each mod's `extended.mod.json`, while
+native window shortcuts remain in the existing loader configuration. The
+Modloader owns declared-binding discovery and conflict validation. Lua mods
+use `shroudforge.input.is_keybind_down(settingKey)`,
+`shroudforge.input.was_keybind_pressed(settingKey)` and
+`shroudforge.input.keybind_label(settingKey)`. The former
+`is_key_down("F1")` through `is_key_down("F8")` API was removed in 1.7.6.
+Calling it logs a migration error directing mod authors to declare a `keybind`
+setting and assign it in Compatibility → Hotkeys.
+
+## Offline help and UI events
+
+`modules/game-runtime/native/main-menu/` owns the native Enshrouded **Mods** entry. It resolves the menu builder and entry renderer from the loaded executable's string references and decoded call graph, independently of ECS profiles. The native callback and `shroudforge.ui.toggle_modloader()` signal the same per-game-process event consumed by `modules/modloader/ui/host/native_menu_toggle.rs`. That host also publishes the existing `general.showNativeModMenu` setting through the visibility event. Native lifecycle and diagnostics include the menu binding.
+
+`modules/wiki/` owns offline help. Articles live at `articles/<article-id>/<locale>.md`, with a shared `illustration.svg` beside the translations. The first H1 supplies the title and the first paragraph supplies the banner summary. `ui/read-wiki-articles.ts` discovers articles and illustrations automatically during the frontend build and selects the available translation. The Wiki page and contextual help use the same reader and article content, without a second route list. Published website articles remain under `docs/pages/`.
+
+`modules/logging/ui/log-ui-event.ts` sends bounded Wiki and Compatibility UI events through the existing host command transport. `modules/modloader/ui/host/record_ui_log.rs` validates the source, level and text and writes each event through `write_activity_at_level`, retaining the configured log filter. Explicit warning and error notifications use the existing command-result toast path. UI events do not repeat native DLL execution results.
+
 ## Find a change by its action
 
 A file contains the implementation of the action named by that file. Related helpers stay beside that action. Each module owns its UI. The Modloader window supplies inputs and displays results.
@@ -128,17 +168,27 @@ A file contains the implementation of the action named by that file. Related hel
 | What you want to change | Open this file |
 | --- | --- |
 | Find installed mods | `modules/modloader/find_installed_mods.rs` |
-| Read the live player name from the Enshrouded login log or character menu memory, and persist successful detections | `modules/player-name/lib.rs`, `modules/player-name/read_game_login_player_name.rs`, `modules/player-name/read_live_character_selection.rs` |
-| Read a mod's information | `modules/modloader/read_mod_manifest.rs` |
+| Provide the selected character name to Lua and the Modloader | `modules/game-runtime/native/main-menu/resolve_character_selection.cpp` derives the original selected-entry/name contract from the existing menu builder. `manage_native_main_menu.cpp` observes changes during its existing UI callback and owns copied name bytes. The optional ABI, Rust bridge and `runtime.player.name()` read that cache. The existing runtime status publication carries the same value to `modules/player-name/lib.rs`, which applies the Modloader manual/default-name policy without process access or a reader thread. |
+| Read a mod's information and locale catalogs | `modules/modloader/read_mod_manifest.rs`, `modules/modloader/read_mod_locale_catalogs.rs`, `modules/modloader/resolve_mod_locale.rs` |
 | Save mod settings | `modules/modloader/save_mod_settings.rs` |
+| Parse SDL scancode shortcuts, observe keyboard input, or edit the shared shortcut field | `modules/hotkeys/` |
+| Check declared module and mod shortcut conflicts | `modules/modloader/check_hotkey_conflicts.rs` |
 | Change a mod's enabled state | `modules/modloader/set_mod_enabled.rs` |
 | Create a missing EML compatibility extension | `modules/modloader/ensure_eml_extension.rs` |
 | Check the revision, validate, and write changed mod configuration | `modules/modloader/update_mod_configuration.rs` |
 | Check conflicting mods | `modules/modloader/check_mod_conflicts.rs` |
 | Select the mod load order | `modules/modloader/plan_mod_load_order.rs` |
+| Detect native components and resolve the DLL load plan | `modules/modloader/dll_manager.rs` |
+| Read compatibility adapters and match automatic or manual selections | `modules/modloader/mod_profiles.rs`, `modules/modloader/mod-profiles/README.md` |
+| Load native DLLs once per process | `modules/mod-runtime/native_dlls.rs` |
+| Initialize a mod DLL's native bridge and keep its registered functions | `modules/mod-runtime/native_bridge/register_mod_functions.rs`, C contract in `shroudforge_mod_native.h` |
+| Give a mod's DLL the local camera while the mod has runtime access | `modules/mod-runtime/native_bridge/read_local_camera.rs`, `track_game_access.rs` (granted from `modules/mod-runtime/session/record_runtime_state.rs`), reader `KfcRuntimeReadLocalCamera` |
+| Call a mod's own native functions from its Lua code | `modules/mod-runtime/native_bridge/call_mod_function.rs`, Lua table in `modules/mod-runtime/lua/shroudforge/v1/call_mod_native_functions.rs` |
 | Read or save loader settings | `modules/loader-config/read_loader_settings.rs`, `save_loader_settings.rs` |
 | Fit, resize, position, save, and reset native Modloader, Updater, and Debug Console window geometry | `modules/window-management/window_geometry.rs`, `reset_window_geometry.rs` |
 | Write a log entry | `modules/logging/append_log.rs` |
+| Log a Wiki or Compatibility UI event | `modules/logging/ui/log-ui-event.ts`, `modules/modloader/ui/host/record_ui_log.rs` |
+| Discover and display offline help articles and contextual banners | `modules/wiki/ui/read-wiki-articles.ts`, `show-wiki.tsx`, `show-wiki-help.tsx`, `show-wiki-article.tsx` |
 | Mark news as read | `modules/notifications/mark_news_read.rs` |
 | Display a short result message | `modules/notifications/ui/show-toasts.tsx` |
 | Run update requests and versioned maintenance jobs | `modules/updater/lib.rs` (`run_request`), `modules/updater/maintenance_jobs.rs`, and the feature implementations under `modules/updater/` |
@@ -175,7 +225,7 @@ The Lua World Editor under `mods/world-editor/src/` owns blueprint planning and 
 
 The dedicated-server coordinators in `operations.lua` and `history.lua` pass the authenticated peer's validated anchor and undo transaction into those same placement and restoration actions. They do not duplicate native feature requirements, grid validation or availability sampling. `p2p.lua` owns framing, transfer integrity, authorization callbacks and result delivery. The editor callback interval is 100 ms. Additional client readiness observations run at most once per two accumulated callback seconds and pause during active work.
 
-Online F8 sends the selection through `p2p.lua`, runs the canonical capture on the server and returns V7 content for client validation and `library.lua::save_capture`. Local and remote captures share unique naming and file writes. `p2p.lua` owns the bounded FIFO request queue, separate peer upload buffers and peer/request receipts. `operations.lua` keeps each peer's latest native undo journal and only activates one journal during a serialized operation. `history.lua` restores and releases only the matching peer's journal. A confirmed journal does not block another F7. Partial recovery does. These journals remain session-bound and in memory.
+The online capture action sends the selection through `p2p.lua`, runs the canonical capture on the server and returns V7 content for client validation and `library.lua::save_capture`. Local and remote captures share unique naming and file writes. `p2p.lua` owns the bounded FIFO request queue, separate peer upload buffers and peer/request receipts. `operations.lua` keeps each peer's latest native undo journal and only activates one journal during a serialized operation. `history.lua` restores and releases only the matching peer's journal. A confirmed journal does not block another paste action. Partial recovery does. These journals remain session-bound and in memory.
 
 See [Lua and native runtime](../runtime/native-runtime-and-game-profiles.en.md) for the runtime, interface, and profile workflow.
 
@@ -186,6 +236,8 @@ The release ZIP contains these main program files:
 | Installed file | What it is for |
 | --- | --- |
 | **winmm.dll** | Starts the ShroudForge bridge beside Enshrouded. |
+| **dbghelp.dll** | Windows proxy and normal game-imported entry to the ShroudForge bridge. |
+| **dinput8.dll** | Alternative bootstrap and DirectInput chain host for native mods selected by the DLL Manager. |
 | **shroudforge/shroudforge-runtime.dll** | Loader library used by the bridge. |
 | **shroudforge/shroudforge.exe** | Main program: launcher, command-line tools, and linked ShroudForge modules. |
 | **shroudforge/shroudforge-updater.exe** | Owns update checks and actions, queued work, versioned migration jobs, and recycle-bin operations. The Modloader UI sends actions to its request mode. |
@@ -203,6 +255,7 @@ ShroudForge also creates or updates these working files as you use it:
 | **shroudforge/ui/** | Mod downloads, queued actions, and removed-mod storage. |
 | **shroudforge/updates/** | Update downloads, queued work, and backups. |
 | **shroudforge/runtime/** | Runtime status and requests shared with the running game. |
+| **shroudforge/runtime/profiles/mod-profiles/** | Update-managed JSON compatibility adapters for mods. These are separate from game-build profiles. |
 | **shroudforge/runtime/diagnostics/jobs/** | User-defined diagnostic job manifests. This folder follows a custom Runtime storage path when configured. |
 | **shroudforge/cache/** | Saved parser and Lua type information, plus temporary bundled diagnostic sources under **diagnostics/**. |
 | **shroudforge/exports/** | Mod exports and diagnostic result files under **diagnostics/&lt;job-id&gt;/**. |

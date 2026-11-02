@@ -6,7 +6,7 @@ use super::parse_console_message::parse_console_message;
 use super::position_console_window::position_window;
 use super::read_console_arguments::arguments;
 use super::read_console_settings::Config;
-use super::read_console_snapshot::read_console_snapshot;
+use super::read_console_snapshot::{read_console_snapshot, ConsoleFollowers};
 use super::read_window_events::foreground_process;
 use super::read_window_events::open_event;
 use super::refresh_console_settings::refresh_console_settings;
@@ -28,12 +28,14 @@ use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use wry::WebContext;
 use wry::WebViewBuilder;
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = arguments()?;
+    if let Err(error) = shroudforge_logging::initialize(&arguments.root, false) {
+        eprintln!("Could not initialize Debug Console logging: {error}");
+    }
     let mut preferences =
         shroudforge_loader_config::config::read_loader(&arguments.root)?["modules"]["debugConsole"]
             .clone();
@@ -52,6 +54,10 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(open_event)
         .unwrap_or(std::ptr::null_mut());
     let event_loop = EventLoop::new();
+    event_loop.set_device_event_filter(tao::event_loop::DeviceEventFilter::Always);
+    if let Err(error) = shroudforge_hotkeys::initialize() {
+        let _ = shroudforge_logging::append(&arguments.root, 'W', "hotkeys", &error);
+    }
     let window = create_console_window(&event_loop, &arguments)?;
     let mut effective_window_geometry =
         position_window(&window, &preferences["window"]["position"], true);
@@ -76,6 +82,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_ipc_handler(handler)
         .build(&window)?;
     let mut shown = arguments.desktop;
+    let mut window_topmost = false;
     let initial_window_state = shroudforge_loader_config::config::window_state(&arguments.root);
     let mut visibility_request_id = initial_window_state["debugConsole"]["requestId"]
         .as_u64()
@@ -85,7 +92,14 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
         "debugConsole",
         shown,
     );
-    let mut key_down = false;
+    let mut previous_toggle_key = config.toggle_key.clone();
+    let initial_toggle_press_revision = shroudforge_hotkeys::parse_hotkey(&config.toggle_key)
+        .ok()
+        .flatten()
+        .as_ref()
+        .map_or(0, shroudforge_hotkeys::hotkey_press_revision);
+    let mut toggle_debouncer =
+        shroudforge_hotkeys::WindowToggleDebouncer::new(initial_toggle_press_revision);
     let mut fatal_seen = false;
     let mut failure_review = false;
     let mut game_exited = false;
@@ -98,11 +112,19 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut bootstrap_popup_shown = false;
     let log_path = shroudforge_loader_config::paths::current_log(&arguments.root);
     let mut user_enabled = preferences["enabled"] != false;
+    let mut next_alert_scan = Instant::now();
     let mut next_activation_poll = Instant::now();
     let mut next_visibility_poll = Instant::now();
     let mut next_refresh = Instant::now();
+    let mut was_refresh_window_visible = window.is_visible() && !window.is_minimized();
     let mut last_config_error: Option<String> = None;
     let mut pending_window_geometry_save: Option<Instant> = None;
+    // A hidden console neither reads the logs nor renders. A visible one
+    // sends the page only new complete log lines, and its settings when they
+    // change; showing it again resends both log tails.
+    let mut followers = ConsoleFollowers::default();
+    let mut last_settings = String::new();
+    let mut webview_visible = window.is_visible();
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50));
         match event {
@@ -152,6 +174,11 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                         shroudforge_loader_config::config::read_loader(&arguments.root)
                     {
                         let debug_settings = &settings["modules"]["debugConsole"];
+                        if let Some(toggle_key) = debug_settings["toggleKey"].as_str()
+                            && config.toggle_key != toggle_key
+                        {
+                            config.toggle_key = toggle_key.to_owned();
+                        }
                         let enabled = debug_settings["enabled"] != false;
                         for key in ["popupMode", "popupCooldownSeconds"] {
                             if let Some(value) = debug_settings.get(key) {
@@ -175,30 +202,33 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    next_activation_poll = Instant::now() + Duration::from_millis(250);
+                    next_activation_poll = Instant::now() + Duration::from_secs(1);
                 }
                 let popup_mode = if user_enabled && arguments.startup_watch {
                     preferences["popupMode"].as_str().unwrap_or("bootstrap")
                 } else {
                     "off"
                 };
-                if scan_log_for_alert(
-                    &log_path,
-                    &mut log_offset,
-                    popup_mode,
-                    &mut bootstrap_complete,
-                    &mut bootstrap_popup_shown,
-                ) && user_enabled
-                {
-                    fatal_seen = true;
-                    failure_review = true;
-                    open_for_alert(
-                        &window,
-                        &arguments.root,
-                        &mut shown,
-                        &mut auto_open_alert,
-                        auto_open_suppressed_until,
-                    );
+                if Instant::now() >= next_alert_scan {
+                    next_alert_scan = Instant::now() + Duration::from_millis(500);
+                    if scan_log_for_alert(
+                        &log_path,
+                        &mut log_offset,
+                        popup_mode,
+                        &mut bootstrap_complete,
+                        &mut bootstrap_popup_shown,
+                    ) && user_enabled
+                    {
+                        fatal_seen = true;
+                        failure_review = true;
+                        open_for_alert(
+                            &window,
+                            &arguments.root,
+                            &mut shown,
+                            &mut auto_open_alert,
+                            auto_open_suppressed_until,
+                        );
+                    }
                 }
                 if !game_exited && !arguments.game_process.is_null()
                     && unsafe { WaitForSingleObject(arguments.game_process, 0) } == WAIT_OBJECT_0
@@ -294,10 +324,31 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                     next_visibility_poll = Instant::now() + Duration::from_millis(100);
                 }
                 let foreground = foreground_process();
-                let game_focused = arguments.desktop || foreground == arguments.game_pid;
+                let game_focused = !arguments.desktop && foreground == arguments.game_pid;
                 let console_focused = foreground == unsafe { GetCurrentProcessId() };
-                let down = unsafe { GetAsyncKeyState(config.toggle_key as i32) } < 0;
-                if user_enabled && (game_focused || console_focused) && down && !key_down {
+                let next_topmost = !arguments.desktop
+                    && shown
+                    && (game_focused || console_focused);
+                if next_topmost != window_topmost {
+                    window.set_always_on_top(next_topmost);
+                    window_topmost = next_topmost;
+                }
+                let binding = shroudforge_hotkeys::parse_hotkey(&config.toggle_key)
+                    .ok()
+                    .flatten();
+                let press_revision = binding
+                    .as_ref()
+                    .map_or(0, shroudforge_hotkeys::hotkey_press_revision);
+                if config.toggle_key != previous_toggle_key {
+                    toggle_debouncer.reset(press_revision);
+                    previous_toggle_key = config.toggle_key.clone();
+                }
+                if toggle_debouncer.should_toggle(press_revision, || {
+                    !arguments.desktop
+                        && user_enabled
+                        && (game_focused || console_focused)
+                        && !shroudforge_hotkeys::is_capture_active()
+                }) {
                     shown = !shown;
                     if !shown {
                         auto_open_suppressed_until = suppress_reopen_until(&preferences);
@@ -311,7 +362,6 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                         window.set_focus();
                     }
                 }
-                key_down = down;
                 if !user_enabled && shown {
                     shown = false;
                     window.set_visible(false);
@@ -327,16 +377,41 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else if shown && (game_focused || console_focused) && !window.is_visible() {
                     window.set_visible(true);
                 }
-                if Instant::now() >= next_refresh {
+                let refresh_window_visible = window.is_visible() && !window.is_minimized();
+                if refresh_window_visible != webview_visible {
+                    // Lets WebView2 suspend rendering while the console is hidden.
+                    let _ = webview.set_visible(refresh_window_visible);
+                    webview_visible = refresh_window_visible;
+                }
+                if refresh_window_visible && !was_refresh_window_visible {
+                    // The logs grew while hidden: resend both tails.
+                    followers.reset();
+                    next_refresh = Instant::now();
+                }
+                was_refresh_window_visible = refresh_window_visible;
+                if refresh_window_visible && Instant::now() >= next_refresh {
                     let Some(minimum_level) = refresh_console_settings(&arguments, &window, &mut preferences, &mut effective_window_geometry, &mut config, &mut user_enabled, &mut last_config_error, control_flow) else { return; };
                     next_refresh =
                         Instant::now() + Duration::from_millis(config.refresh_milliseconds);
-                    let payload = read_console_snapshot(&arguments, &config, &preferences, minimum_level, auto_open_alert);
-                    if webview
-                        .evaluate_script(&format!("window.__shroudforgeUpdate({});", payload))
-                        .is_ok()
-                    {
-                        auto_open_alert = false;
+                    if refresh_window_visible {
+                        let (settings, logs) = read_console_snapshot(&arguments, &config, &preferences, minimum_level, auto_open_alert, &mut followers);
+                        let settings_text = settings.to_string();
+                        let has_logs = !logs["game"].is_null() || !logs["loader"].is_null();
+                        if has_logs || settings_text != last_settings {
+                            let mut payload = settings;
+                            payload["game"] = logs["game"].clone();
+                            payload["loader"] = logs["loader"].clone();
+                            if webview
+                                .evaluate_script(&format!("window.__shroudforgeUpdate({payload});"))
+                                .is_ok()
+                            {
+                                auto_open_alert = false;
+                                last_settings = settings_text;
+                            } else {
+                                // The page missed these lines: resend the tails next time.
+                                followers.reset();
+                            }
+                        }
                     }
                 }
             }
